@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -295,6 +296,50 @@ def _index_tokens(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _parse_security_info(raw: str) -> dict[str, Any]:
+    try:
+        loaded = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def l2b_card_fields(info: dict[str, Any], network: str) -> dict[str, Any]:
+    data = as_dict(info.get("data")) if isinstance(info.get("data"), dict) else info
+    attrs = as_dict(data.get("attributes") if isinstance(data, dict) else None)
+    out: dict[str, Any] = {}
+    holders = as_dict(attrs.get("holders"))
+    count = _as_float(holders.get("count"))
+    if count is not None:
+        out["holders"] = count
+    gt = attrs.get("gt_score")
+    if isinstance(gt, dict):
+        gt_n = _as_float(gt.get("score") or gt.get("total"))
+    else:
+        gt_n = _as_float(gt)
+    if gt_n is not None:
+        out["gt_score"] = gt_n
+    if attrs.get("mint_authority") is not None:
+        out["mint_authority"] = attrs.get("mint_authority")
+    if attrs.get("freeze_authority") is not None:
+        out["freeze_authority"] = attrs.get("freeze_authority")
+    if attrs.get("is_honeypot") is not None:
+        out["honeypot"] = attrs.get("is_honeypot")
+    return out
+
+
+def _remember_card(
+    card_fields: dict[tuple[str, str], dict[str, Any]] | None,
+    pool: PoolSnapshot,
+    info: dict[str, Any],
+) -> None:
+    if card_fields is None:
+        return
+    fields = l2b_card_fields(info, pool.network)
+    if fields:
+        card_fields[(pool.network, pool.token_address)] = fields
+
+
 async def run_l2b(
     pools: list[PoolSnapshot],
     raw: dict[str, Any],
@@ -302,6 +347,7 @@ async def run_l2b(
     client: CgClient,
     now: datetime,
     funnel: Funnel,
+    card_fields: dict[tuple[str, str], dict[str, Any]] | None = None,
 ) -> list[PoolSnapshot]:
     funnel.add("l2b", "_input", len(pools))
     sec = raw["security"]
@@ -313,6 +359,9 @@ async def run_l2b(
             cached_ok = int(cached["passed"])
             if cached_ok:
                 passed.append(pool)
+                _remember_card(
+                    card_fields, pool, _parse_security_info(str(cached["result_json"]))
+                )
             else:
                 funnel.add("l2b", "cached_reject")
             continue
@@ -328,12 +377,13 @@ async def run_l2b(
         store.put_security(
             pool.network,
             pool.token_address,
-            str(info),
+            json.dumps(info, ensure_ascii=True),
             ok,
             now.astimezone(UTC).isoformat(),
         )
         if ok:
             passed.append(pool)
+            _remember_card(card_fields, pool, info)
         elif rule:
             funnel.add("l2b", rule)
     funnel.add("l2b", "_passed", len(passed))

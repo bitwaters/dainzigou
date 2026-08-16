@@ -47,6 +47,11 @@ def payload_from_signal_row(row: Any) -> dict[str, Any]:
         "price_change_pct": feats.get("price_change_pct"),
         "price_change_usd": feats.get("price_change_usd"),
         "price_change_native": feats.get("price_change_native"),
+        "dwell_sec": feats.get("dwell_sec"),
+        "gt_score": feats.get("gt_score"),
+        "mint_authority": feats.get("mint_authority"),
+        "freeze_authority": feats.get("freeze_authority"),
+        "honeypot": feats.get("honeypot"),
     }
 
 
@@ -57,48 +62,196 @@ def sanitize_chain_text(value: str, max_len: int) -> str:
     return text[:max_len]
 
 
+_CHAIN_LABEL = {"solana": "SOL", "bsc": "BSC"}
+_GMGN_CHAIN = {"solana": "sol", "bsc": "bsc"}
+_DBOT_CHAIN = {"solana": "solana", "bsc": "bsc"}
+_PCT_ABS_MAX = 9999.0
+
+
+def _as_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _compact(n: float, suffix: str) -> str:
+    text = f"{n:.1f}{suffix}"
+    return text.replace(f".0{suffix}", suffix)
+
+
+def fmt_usd(value: Any) -> str | None:
+    n = _as_float(value)
+    if n is None:
+        return None
+    abs_n = abs(n)
+    if abs_n < 1000:
+        return f"${n:.0f}" if abs_n >= 100 else f"${n:.2f}"
+    if abs_n < 1_000_000:
+        return f"${_compact(n / 1000, 'K')}"
+    if abs_n < 1_000_000_000:
+        return f"${_compact(n / 1_000_000, 'M')}"
+    return f"${_compact(n / 1_000_000_000, 'B')}"
+
+
+def fmt_count(value: Any) -> str | None:
+    n = _as_float(value)
+    if n is None:
+        return None
+    if abs(n) < 1000:
+        return f"{n:.0f}"
+    if abs(n) < 1_000_000:
+        return _compact(n / 1000, "K")
+    return _compact(n / 1_000_000, "M")
+
+
+def fmt_age(value: Any) -> str | None:
+    n = _as_float(value)
+    if n is None:
+        return None
+    if n < 60:
+        return f"{n:.0f}min" if n < 10 else f"{n:.1f}min"
+    if n < 60 * 48:
+        return f"{n / 60:.1f}h"
+    return f"{n / 60 / 24:.1f}d"
+
+
+def fmt_pct(value: Any) -> str | None:
+    n = _as_float(value)
+    if n is None or abs(n) > _PCT_ABS_MAX:
+        return None
+    sign = "+" if n > 0 else ""
+    return f"{sign}{n:.1f}%"
+
+
+def fmt_dwell(value: Any) -> str | None:
+    n = _as_float(value)
+    if n is None:
+        return None
+    if n < 60:
+        return f"{n:.0f}s"
+    return f"{n / 60:.0f}min"
+
+
+def fmt_ratio(value: Any) -> str | None:
+    n = _as_float(value)
+    if n is None:
+        return None
+    return f"{n:.1f}"
+
+
+def fmt_clock(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return ts.astimezone(UTC).strftime("%H:%M:%S UTC")
+    except ValueError:
+        return raw
+
+
+def _windows_line(chg: Any) -> str | None:
+    if not isinstance(chg, dict):
+        return None
+    parts: list[str] = []
+    any_num = False
+    for key, label in (("m5", "5m"), ("m15", "15m"), ("h1", "1h")):
+        shown = fmt_pct(chg.get(key))
+        if shown:
+            any_num = True
+            parts.append(f"{label} {shown}")
+        else:
+            parts.append(f"{label} —")
+    return " · ".join(parts) if any_num else None
+
+
+def _security_line(payload: dict[str, Any], network: str) -> str:
+    parts: list[str] = []
+    if network == "solana":
+        parts.append("蜜罐 未检测")
+    else:
+        hp = payload.get("honeypot")
+        if hp is True:
+            parts.append("蜜罐 是")
+        elif hp is False or hp in {"no", "false"}:
+            parts.append("蜜罐 否")
+        elif hp is not None:
+            parts.append("蜜罐 未知")
+    mint = payload.get("mint_authority")
+    freeze = payload.get("freeze_authority")
+    if mint == "no" and freeze == "no":
+        parts.append("权限已弃权")
+    gt = fmt_count(payload.get("gt_score"))
+    if gt is not None:
+        parts.append(f"GT {gt}")
+    return " · ".join(parts)
+
+
 def render_signal(payload: dict[str, Any], raw: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     max_len = int(raw["telegram"]["symbol_max_len"])
     symbol = sanitize_chain_text(str(payload.get("symbol") or "?"), max_len)
     network = str(payload.get("network") or "")
+    chain = _CHAIN_LABEL.get(network, network.upper() or "?")
     ca = html.escape(str(payload.get("token_address") or ""), quote=True)
-    created = str(payload.get("created_at") or "")
-    honeypot = "未检测" if network == "solana" else str(payload.get("honeypot") or "未知")
-    age = payload.get("age_min")
-    age_s = f"{float(age):.1f}min" if age is not None else "?"
-    raw_chg = payload.get("price_change_usd")
-    chg = raw_chg if isinstance(raw_chg, dict) else {}
-    chg_s = (
-        f"m5 {chg.get('m5', '?')}% / m15 {chg.get('m15', '?')}% / h1 {chg.get('h1', '?')}%"
-        if chg
-        else "m5 ?% / m15 ?% / h1 ?%"
-    )
-    text = (
-        f"🚀 ${symbol} ({html.escape(network)}) · 池龄 {html.escape(str(age_s))}\n"
-        f"CA: <code>{ca}</code>\n"
-        f"FDV ${payload.get('fdv_usd') or '?'} · 流动性 ${payload.get('reserve_usd') or '?'}"
-        f" · 持有人 {payload.get('holders') or '?'}\n"
-        f"涨跌 {html.escape(chg_s)}\n"
-        f"确认: 独立买家 {payload.get('buyers')}/{payload.get('sellers')} · "
-        f"买卖比 {payload.get('buy_sell_ratio')} · {payload.get('price_change_pct')}%\n"
-        f"安全: 蜜罐 {honeypot}\n"
-        f"时间: {html.escape(created)} UTC"
-    )
-    net_q = quote(network)
-    pool_q = quote(str(payload.get("pool_address") or payload.get("token_address") or ""))
-    token_q = quote(str(payload.get("token_address") or ""))
+    age = fmt_age(payload.get("age_min")) or "—"
+    lines = [f"🚀 确认  ${symbol}", f"{html.escape(chain)} · 池龄 {age}", ""]
+    lines.append(f"<code>{ca}</code>")
+    money: list[str] = []
+    fdv = fmt_usd(payload.get("fdv_usd"))
+    liq = fmt_usd(payload.get("reserve_usd"))
+    if fdv:
+        money.append(f"FDV {fdv}")
+    if liq:
+        money.append(f"流动性 {liq}")
+    if money:
+        lines.append("")
+        lines.append("💰 " + " · ".join(money))
+    holders = fmt_count(payload.get("holders"))
+    if holders:
+        lines.append(f"👥 持有人 {holders}")
+    windows = _windows_line(payload.get("price_change_usd"))
+    if windows:
+        lines.append(f"📈 {windows}")
+    confirm: list[str] = []
+    dwell = fmt_dwell(payload.get("dwell_sec"))
+    if dwell:
+        confirm.append(f"盯盘 {dwell}")
+    buyers = payload.get("buyers")
+    sellers = payload.get("sellers")
+    if buyers is not None or sellers is not None:
+        buy_s = buyers if buyers is not None else "—"
+        sell_s = sellers if sellers is not None else "—"
+        confirm.append(f"买家 {buy_s} / 卖家 {sell_s}")
+    ratio = fmt_ratio(payload.get("buy_sell_ratio"))
+    if ratio:
+        confirm.append(f"买卖比 {ratio}")
+    chg = fmt_pct(payload.get("price_change_pct"))
+    if chg:
+        confirm.append(chg)
+    if confirm:
+        lines.append("✅ " + " · ".join(confirm))
+    security = _security_line(payload, network)
+    if security:
+        lines.append(f"🛡 {security}")
+    clock = fmt_clock(payload.get("created_at"))
+    if clock:
+        lines.append("")
+        lines.append(html.escape(clock))
+    token_q = quote(str(payload.get("token_address") or ""), safe="")
+    gmgn = _GMGN_CHAIN.get(network, network)
+    dbot = _DBOT_CHAIN.get(network, network)
     markup = {
         "inline_keyboard": [
             [
-                {
-                    "text": "GeckoTerminal",
-                    "url": f"https://www.geckoterminal.com/{net_q}/pools/{pool_q}",
-                },
-                {"text": "DexScreener", "url": f"https://dexscreener.com/{net_q}/{token_q}"},
+                {"text": "GMGN", "url": f"https://gmgn.ai/{gmgn}/token/{token_q}"},
+                {"text": "Debot", "url": f"https://dbotx.com/{dbot}/{token_q}"},
             ]
         ]
     }
-    return text, markup
+    return "\n".join(lines), markup
 
 
 class Notifier:

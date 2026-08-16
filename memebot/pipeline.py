@@ -252,7 +252,10 @@ async def process_batches(
     funnel.add("stream", "_raw", len(pools))
     survivors = run_l0_l1(pools, raw, store, now, funnel)
     survivors = await run_l2a(survivors, raw, store, client, now, funnel)
-    survivors = await run_l2b(survivors, raw, store, client, now, funnel)
+    card_fields: dict[tuple[str, str], dict[str, Any]] = {}
+    survivors = await run_l2b(
+        survivors, raw, store, client, now, funnel, card_fields=card_fields
+    )
     seen_at = now.isoformat()
     for pool in survivors:
         store.upsert_pool(
@@ -264,7 +267,13 @@ async def process_batches(
             seen_at,
             symbol=pool.symbol,
         )
-    scored = [(p, *score_pool(p, raw, now)) for p in survivors]
+    scored: list[tuple[PoolSnapshot, float, dict[str, Any]]] = []
+    for pool in survivors:
+        total, feats = score_pool(pool, raw, now)
+        extra = card_fields.get((pool.network, pool.token_address))
+        if extra:
+            feats.update(extra)
+        scored.append((pool, total, feats))
     n = int(raw["scoring"]["candidates_per_chain_per_cycle"])
     funnel.add("scoring", "_input", len(scored))
     picked, rest = pick_top_n(scored, n)

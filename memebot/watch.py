@@ -43,6 +43,22 @@ class ConfirmResult:
     at: datetime | None = None
 
 
+def _token_price_usd(attrs: dict[str, Any], kind: str) -> float | None:
+    # buy: token is "to"; sell: token is "from". Using price_to for both
+    # treats a sell as quote-token USD (e.g. SOL ~$75) and explodes confirm %.
+    primary = "price_to_in_usd" if kind == "buy" else "price_from_in_usd"
+    secondary = "price_from_in_usd" if kind == "buy" else "price_to_in_usd"
+    for key in (primary, secondary):
+        raw = attrs.get(key)
+        if raw is None or raw == "":
+            continue
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def parse_trades(
     payload: dict[str, Any], min_trade_usd: float, entered_at: datetime
 ) -> list[Trade]:
@@ -65,14 +81,7 @@ def parse_trades(
         if kind not in {"buy", "sell"}:
             continue
         sender = str(attrs.get("tx_from_address") or attrs.get("from_token_address") or "")
-        price = None
-        try:
-            if attrs.get("price_to_in_usd") is not None:
-                price = float(attrs["price_to_in_usd"])
-            elif attrs.get("price_from_in_usd") is not None:
-                price = float(attrs["price_from_in_usd"])
-        except (TypeError, ValueError):
-            price = None
+        price = _token_price_usd(attrs, kind)
         out.append(Trade(ts=ts, side=kind, usd=usd, price=price, sender=sender))
     out.sort(key=lambda t: t.ts)
     return out

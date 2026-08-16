@@ -265,7 +265,22 @@ class Runtime:
             "price_change_usd": sess.features.get("price_change_usd"),
             "price_change_native": sess.features.get("price_change_native"),
             "holders": sess.features.get("holders"),
+            "dwell_sec": stats.actual_dwell_sec,
+            "gt_score": sess.features.get("gt_score"),
+            "mint_authority": sess.features.get("mint_authority"),
+            "freeze_authority": sess.features.get("freeze_authority"),
+            "honeypot": sess.features.get("honeypot"),
         }
+        features = dict(sess.features)
+        features.update(
+            {
+                "dwell_sec": stats.actual_dwell_sec,
+                "buyers": stats.buyers,
+                "sellers": stats.sellers,
+                "buy_sell_ratio": stats.buy_sell_ratio,
+                "price_change_pct": stats.price_change_pct,
+            }
+        )
         sid = self.notifier.try_insert_pending(
             network=sess.network,
             token_address=sess.token_address,
@@ -274,7 +289,7 @@ class Runtime:
             config_hash=self.cfg.config_hash,
             payload=payload,
             score=sess.score,
-            features=sess.features,
+            features=features,
             price=sess.baseline,
             fdv=sess.features.get("fdv_usd"),
         )
