@@ -25,7 +25,7 @@ from memebot.tracker import (
     report_date_utc,
     report_stats,
 )
-from memebot.watch import ConfirmStats, Watcher, evaluate_trades, parse_trades
+from memebot.watch import ConfirmStats, Watcher, evaluate_trades, parse_trades, scale_from_baseline
 
 log = logging.getLogger("memebot.runtime")
 
@@ -227,10 +227,15 @@ class Runtime:
                 confirm=self.cfg.raw["watch"]["confirm"],
                 now=now,
                 entered_at=sess.entered_at,
+                seen_peak=sess.peak_price,
             )
+            if result.peak_price is not None:
+                sess.peak_price = result.peak_price
             if result.confirmed:
                 self.watcher.finish(sess, now, "confirmed", result.stats, funnel.add)
-                await self._emit_confirmed(sess, result.stats, now)
+                await self._emit_confirmed(sess, result.stats, now, result.last_price)
+            elif result.aborted_rule == "drawdown_from_peak":
+                self.watcher.finish(sess, now, "timeout", result.stats, funnel.add)
             elif (now - sess.entered_at).total_seconds() >= window * 60:
                 self.watcher.finish(sess, now, "timeout", result.stats, funnel.add)
         except Exception:
@@ -240,18 +245,29 @@ class Runtime:
                 self.watcher.finish(sess, now, "timeout", ConfirmStats(), funnel.add)
             log.exception("watch poll failed %s", sess.pool_id)
 
-    async def _emit_confirmed(self, sess: Any, stats: Any, now: datetime) -> None:
+    async def _emit_confirmed(self, sess: Any, stats: Any, now: datetime, last_price: float | None) -> None:
+        tx = sess.features.get("tx") or {}
+        pool_buyers_m15 = (tx.get("m15") or {}).get("buyers")
+        fdv_now = scale_from_baseline(sess.features.get("fdv_usd"), sess.baseline, last_price)
+        age_admit = sess.features.get("age_min")
+        age_now = None
+        if age_admit is not None:
+            try:
+                age_now = float(age_admit) + stats.actual_dwell_sec / 60.0
+            except (TypeError, ValueError):
+                age_now = age_admit
         payload = {
             "symbol": sess.features.get("symbol"),
             "network": sess.network,
             "token_address": sess.token_address,
             "pool_address": sess.address,
             "created_at": now.isoformat(),
-            "fdv_usd": sess.features.get("fdv_usd"),
+            "fdv_usd": fdv_now,
             "reserve_usd": sess.features.get("reserve_usd"),
-            "age_min": sess.features.get("age_min"),
+            "age_min": age_now,
             "buyers": stats.buyers,
             "sellers": stats.sellers,
+            "pool_buyers_m15": pool_buyers_m15,
             "buy_sell_ratio": stats.buy_sell_ratio,
             "price_change_pct": stats.price_change_pct,
             "price_change_usd": sess.features.get("price_change_usd"),
@@ -269,8 +285,10 @@ class Runtime:
                 "dwell_sec": stats.actual_dwell_sec,
                 "buyers": stats.buyers,
                 "sellers": stats.sellers,
+                "pool_buyers_m15": pool_buyers_m15,
                 "buy_sell_ratio": stats.buy_sell_ratio,
                 "price_change_pct": stats.price_change_pct,
+                "fdv_usd": fdv_now,
             }
         )
         sid = self.notifier.try_insert_pending(
@@ -282,8 +300,8 @@ class Runtime:
             payload=payload,
             score=sess.score,
             features=features,
-            price=sess.baseline,
-            fdv=sess.features.get("fdv_usd"),
+            price=last_price if last_price is not None else sess.baseline,
+            fdv=fdv_now,
         )
         if sid is not None:
             payload["signal_id"] = sid

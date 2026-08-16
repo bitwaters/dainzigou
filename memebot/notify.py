@@ -43,6 +43,7 @@ def payload_from_signal_row(row: Any) -> dict[str, Any]:
         "holders": feats.get("holders"),
         "buyers": feats.get("buyers"),
         "sellers": feats.get("sellers"),
+        "pool_buyers_m15": feats.get("pool_buyers_m15"),
         "buy_sell_ratio": feats.get("buy_sell_ratio"),
         "price_change_pct": feats.get("price_change_pct"),
         "price_change_usd": feats.get("price_change_usd"),
@@ -214,7 +215,7 @@ def render_signal(payload: dict[str, Any], raw: dict[str, Any]) -> tuple[str, di
         lines.append(f"👥 持有人 {holders}")
     windows = _windows_line(payload.get("price_change_usd"))
     if windows:
-        lines.append(f"📈 {windows}")
+        lines.append(f"📈 进盯时 {windows}")
     confirm: list[str] = []
     dwell = fmt_dwell(payload.get("dwell_sec"))
     if dwell:
@@ -224,13 +225,16 @@ def render_signal(payload: dict[str, Any], raw: dict[str, Any]) -> tuple[str, di
     if buyers is not None or sellers is not None:
         buy_s = buyers if buyers is not None else "—"
         sell_s = sellers if sellers is not None else "—"
-        confirm.append(f"买家 {buy_s} / 卖家 {sell_s}")
+        confirm.append(f"窗口买家 {buy_s} / 卖家 {sell_s}")
+    pool_buyers = fmt_count(payload.get("pool_buyers_m15"))
+    if pool_buyers:
+        confirm.append(f"池15m买家 {pool_buyers}")
     ratio = fmt_ratio(payload.get("buy_sell_ratio"))
     if ratio:
         confirm.append(f"买卖比 {ratio}")
     chg = fmt_pct(payload.get("price_change_pct"))
     if chg:
-        confirm.append(chg)
+        confirm.append(f"相对进场 {chg}")
     if confirm:
         lines.append("✅ " + " · ".join(confirm))
     security = _security_line(payload, network)

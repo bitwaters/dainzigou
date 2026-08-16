@@ -34,6 +34,7 @@ class ConfirmStats:
     max_buy_sell_ratio: float | None = None
     max_price_change_pct: float | None = None
     actual_dwell_sec: float = 0.0
+    aborted_rule: str | None = None
 
 
 @dataclass
@@ -41,6 +42,9 @@ class ConfirmResult:
     confirmed: bool
     stats: ConfirmStats
     at: datetime | None = None
+    last_price: float | None = None
+    aborted_rule: str | None = None
+    peak_price: float | None = None
 
 
 def _token_price_usd(attrs: dict[str, Any], kind: str) -> float | None:
@@ -102,6 +106,18 @@ def _sane_price_change(chg: float | None, confirm: dict[str, Any]) -> float | No
     return chg
 
 
+def scale_from_baseline(value: float | None, baseline: float, last: float | None) -> float | None:
+    if value is None or last is None or not baseline:
+        return value
+    return value * (last / baseline)
+
+
+def _peak_drawdown_pct(peak_price: float, last_price: float) -> float | None:
+    if peak_price <= 0:
+        return None
+    return (peak_price - last_price) / peak_price * 100.0
+
+
 def evaluate_trades(
     trades: list[Trade],
     *,
@@ -109,6 +125,7 @@ def evaluate_trades(
     confirm: dict[str, Any],
     now: datetime,
     entered_at: datetime,
+    seen_peak: float | None = None,
 ) -> ConfirmResult:
     buyers: set[str] = set()
     sellers: set[str] = set()
@@ -120,7 +137,16 @@ def evaluate_trades(
     min_bs_addr = float(confirm["min_buyer_seller_ratio"])
     min_bs_cnt = float(confirm["min_buy_sell_ratio"])
     min_chg = float(confirm["min_price_change_pct"])
+    dd_cap = confirm.get("max_drawdown_from_peak_pct")
     confirmed_at: datetime | None = None
+    aborted_rule: str | None = None
+    peak_price = seen_peak if seen_peak is not None else baseline
+    cap: float | None = None
+    if dd_cap is not None:
+        try:
+            cap = float(dd_cap)
+        except (TypeError, ValueError):
+            cap = None
     for trade in trades:
         if trade.side == "buy":
             buys += 1
@@ -132,6 +158,7 @@ def evaluate_trades(
                 sellers.add(trade.sender)
         if trade.price is not None:
             last_price = trade.price
+            peak_price = max(peak_price, last_price)
         raw_chg = ((last_price - baseline) / baseline * 100) if baseline else None
         chg = _sane_price_change(raw_chg, confirm)
         addr_ratio = (len(buyers) / len(sellers)) if sellers else None
@@ -152,15 +179,33 @@ def evaluate_trades(
             stats.max_buy_sell_ratio = max(stats.max_buy_sell_ratio or cnt_ratio, cnt_ratio)
         if chg is not None:
             stats.max_price_change_pct = max(stats.max_price_change_pct or chg, chg)
-        ok_addr = addr_ratio is not None and addr_ratio >= min_bs_addr
-        ok_cnt = cnt_ratio is not None and cnt_ratio >= min_bs_cnt
+        no_sellers = len(sellers) == 0 and sells == 0
         ok_buyers = len(buyers) >= min_buyers
+        ok_addr = (no_sellers and ok_buyers) or (
+            addr_ratio is not None and addr_ratio >= min_bs_addr
+        )
+        ok_cnt = (no_sellers and ok_buyers) or (
+            cnt_ratio is not None and cnt_ratio >= min_bs_cnt
+        )
         ok_chg = chg is not None and chg >= min_chg
+        if cap is not None and last_price is not None:
+            dd = _peak_drawdown_pct(peak_price, last_price)
+            if dd is not None and dd >= cap:
+                aborted_rule = "drawdown_from_peak"
+                break
         if ok_buyers and ok_addr and ok_cnt and ok_chg and confirmed_at is None:
             confirmed_at = trade.ts
             break
     stats.actual_dwell_sec = (now - entered_at).total_seconds()
-    return ConfirmResult(confirmed=confirmed_at is not None, stats=stats, at=confirmed_at)
+    stats.aborted_rule = aborted_rule
+    return ConfirmResult(
+        confirmed=confirmed_at is not None,
+        stats=stats,
+        at=confirmed_at,
+        last_price=last_price,
+        aborted_rule=aborted_rule,
+        peak_price=peak_price,
+    )
 
 
 def cooldown_active(
@@ -205,6 +250,7 @@ class WatchSession:
     baseline: float
     features: dict[str, Any]
     dwell_protected_until: datetime
+    peak_price: float
 
 
 @dataclass
@@ -267,6 +313,7 @@ class Watcher:
             baseline=baseline,
             features=features,
             dwell_protected_until=now + timedelta(seconds=min_dwell),
+            peak_price=baseline,
         )
         self.sessions[k] = sess
         funnel_add("watch", "_input")
@@ -293,6 +340,7 @@ class Watcher:
             "max_buy_sell_ratio": stats.max_buy_sell_ratio,
             "max_price_change_pct": stats.max_price_change_pct,
             "actual_dwell_sec": (now - sess.entered_at).total_seconds(),
+            "aborted_rule": stats.aborted_rule,
         }
         self.store.finish_watch(sess.watch_id, now.isoformat(), outcome, json.dumps(payload))
         self.sessions.pop(self.key(sess.network, sess.token_address), None)

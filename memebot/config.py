@@ -169,11 +169,14 @@ _REQUIRED_PATHS = (
     "watch.min_dwell_sec",
     "watch.window_min",
     "watch.min_trade_usd",
+    "watch.admit.min_m5_pct",
+    "watch.admit.min_m5_pct_on_red_m15",
     "watch.admit.min_m15_pct",
     "watch.confirm.confirm_min_buyers",
     "watch.confirm.min_buyer_seller_ratio",
     "watch.confirm.min_buy_sell_ratio",
     "watch.confirm.min_price_change_pct",
+    "watch.confirm.max_drawdown_from_peak_pct",
     "watch.confirm.sane_pct_min",
     "watch.confirm.sane_pct_max",
     "watch.timeout_cooldown.max_timeouts",
@@ -417,9 +420,25 @@ def validate(raw: dict[str, Any], stop_grace_period: float) -> None:
     if watch_cap >= global_cap:
         raise ConfigError("watch.daily_call_cap", "must be < budget.global_daily_call_cap")
 
+    admit_m5 = _need(raw, "watch.admit.min_m5_pct")
+    if admit_m5 is not None:
+        _as_number("watch.admit.min_m5_pct", admit_m5)
+    admit_m5_red = _need(raw, "watch.admit.min_m5_pct_on_red_m15")
+    if admit_m5_red is not None:
+        _as_number("watch.admit.min_m5_pct_on_red_m15", admit_m5_red)
     admit_m15 = _need(raw, "watch.admit.min_m15_pct")
     if admit_m15 is not None:
         _as_number("watch.admit.min_m15_pct", admit_m15)
+
+    dd = _need(raw, "watch.confirm.max_drawdown_from_peak_pct")
+    if dd is not None:
+        dd_n = _as_number("watch.confirm.max_drawdown_from_peak_pct", dd)
+        if dd_n <= 0:
+            raise ConfigError("watch.confirm.max_drawdown_from_peak_pct", "must be > 0")
+
+    pages = _as_number("streams.megafilter.pages", _need(raw, "streams.megafilter.pages"))
+    if pages < 1 or int(pages) != pages:
+        raise ConfigError("streams.megafilter.pages", "must be an integer >= 1")
 
     min_chg = _as_number(
         "watch.confirm.min_price_change_pct",

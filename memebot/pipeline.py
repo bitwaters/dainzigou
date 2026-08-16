@@ -58,17 +58,43 @@ def drop_unadmittable(
     return open_pools
 
 
-def m15_admit_ok(pool: PoolSnapshot, raw: dict[str, Any]) -> bool:
-    floor = ((raw.get("watch") or {}).get("admit") or {}).get("min_m15_pct")
-    if floor is None:
+def admit_momentum_ok(pool: PoolSnapshot, raw: dict[str, Any]) -> bool:
+    admit = (raw.get("watch") or {}).get("admit") or {}
+    m5_floor = admit.get("min_m5_pct")
+    m5_red = admit.get("min_m5_pct_on_red_m15")
+    m15_floor = admit.get("min_m15_pct")
+    changes = pool.price_change_usd or {}
+
+    def _pct(key: str) -> float | None:
+        raw_v = changes.get(key)
+        if raw_v is None:
+            return None
+        try:
+            return float(raw_v)
+        except (TypeError, ValueError):
+            return None
+
+    m5 = _pct("m5")
+    m15 = _pct("m15")
+    if m15_floor is not None:
+        if m15 is None or m15 < float(m15_floor):
+            return False
+    if m5_floor is None and m5_red is None:
         return True
-    chg = (pool.price_change_usd or {}).get("m15")
-    if chg is None:
+    if m5 is None:
         return False
-    try:
-        return float(chg) >= float(floor)
-    except (TypeError, ValueError):
-        return False
+    if m15 is not None and m15 < 0:
+        bounce = m5_red if m5_red is not None else m5_floor
+        if bounce is None:
+            return True
+        return m5 >= float(bounce)
+    if m5_floor is None:
+        return True
+    return m5 >= float(m5_floor)
+
+
+def m15_admit_ok(pool: PoolSnapshot, raw: dict[str, Any]) -> bool:
+    return admit_momentum_ok(pool, raw)
 
 
 def drop_recently_seen(
@@ -225,6 +251,7 @@ async def collect_stream(
     nets = list(raw["networks"])
     if stream == "megafilter":
         pre = raw["streams"]["megafilter"]["prefilter"]
+        pages = max(1, int(raw["streams"]["megafilter"]["pages"]))
         return [
             (
                 "megafilter",
@@ -234,31 +261,35 @@ async def collect_stream(
                     pool_created_hour_max=float(pre["pool_created_hour_max"]),
                     reserve_in_usd_min=float(pre["reserve_in_usd_min"]),
                     sort=str(pre["sort"]),
-                    page=int(raw["streams"]["megafilter"]["pages"]),
+                    page=page,
                 ),
             )
+            for page in range(1, pages + 1)
         ]
     if stream == "new_pools":
+        pages = max(1, int(raw["streams"]["new_pools"]["pages"]))
         return [
-            ("new_pools", await client.new_pools(page=int(raw["streams"]["new_pools"]["pages"])))
+            ("new_pools", await client.new_pools(page=page)) for page in range(1, pages + 1)
         ]
     if stream == "trending_5m":
+        pages = max(1, int(raw["streams"]["trending_5m"]["pages"]))
+        duration = str(raw["streams"]["trending_5m"]["duration"])
         return [
             (
                 "trending_5m",
-                await client.trending_pools(
-                    duration=str(raw["streams"]["trending_5m"]["duration"]), page=1
-                ),
+                await client.trending_pools(duration=duration, page=page),
             )
+            for page in range(1, pages + 1)
         ]
     if stream == "trending_1h":
+        pages = max(1, int(raw["streams"]["trending_1h"]["pages"]))
+        duration = str(raw["streams"]["trending_1h"]["duration"])
         return [
             (
                 "trending_1h",
-                await client.trending_pools(
-                    duration=str(raw["streams"]["trending_1h"]["duration"]), page=1
-                ),
+                await client.trending_pools(duration=duration, page=page),
             )
+            for page in range(1, pages + 1)
         ]
     raise ValueError(f"unknown stream: {stream}")
 
@@ -345,13 +376,14 @@ async def process_batches(
         scored.append((pool, total, feats))
         funnel.add_once("scoring", "_input", pool.pool_id, pool.source)
     n = int(raw["scoring"]["candidates_per_chain_per_cycle"])
-    if ((raw.get("watch") or {}).get("admit") or {}).get("min_m15_pct") is not None:
+    admit = (raw.get("watch") or {}).get("admit") or {}
+    if any(admit.get(k) is not None for k in ("min_m5_pct", "min_m5_pct_on_red_m15", "min_m15_pct")):
         green: list[tuple[PoolSnapshot, float, dict[str, Any]]] = []
         for item in scored:
-            if m15_admit_ok(item[0], raw):
+            if admit_momentum_ok(item[0], raw):
                 green.append(item)
             else:
-                funnel.add_once("scoring", "m15_not_green", item[0].pool_id, item[0].source)
+                funnel.add_once("scoring", "m5_not_green", item[0].pool_id, item[0].source)
         scored = green
     ready: list[tuple[PoolSnapshot, float, dict[str, Any]]] = []
     for item in scored:

@@ -40,7 +40,7 @@ streams:
   megafilter:
     enabled: true
     interval_sec: 60
-    pages: 1
+    pages: 2                          # 页数，从第 1 页循环到第 N 页
     prefilter:                        # 服务端粗筛，须比本地门槛宽松一档
       pool_created_hour_min: 0.2
       pool_created_hour_max: 7
@@ -80,7 +80,7 @@ collection_gates:
       - "0x55d398326f99059ff775485246999027b3197955"     # USDT
       - "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d"     # USDC
   min_reserve_usd: 20000
-  max_fdv_usd: 200000
+  max_fdv_usd: 500000
   max_fdv_to_reserve: 500
   max_turnover_ratio:
     window: m15
@@ -165,12 +165,15 @@ watch:
   window_min: 20
   min_trade_usd: 10
   admit:
-    min_m15_pct: 0                    # null = 禁用；缺 m15 视为未绿
+    min_m5_pct: 0                     # null = 禁用；缺 m5 视为未绿
+    min_m5_pct_on_red_m15: 10         # m15<0 时的 m5 下限；null = 与 min_m5_pct 相同
+    min_m15_pct: null                 # 额外 m15 门，默认关
   confirm:
     confirm_min_buyers: 15
     min_buyer_seller_ratio: 1.5
     min_buy_sell_ratio: 1.5
-    min_price_change_pct: 15
+    min_price_change_pct: 0           # 相对进场未跌即可
+    max_drawdown_from_peak_pct: 25    # 相对本窗口最高价回撤则 timeout；null = 禁用
     sane_pct_min: -50                 # 越界视为缺失，不确认
     sane_pct_max: 500
   timeout_cooldown:
