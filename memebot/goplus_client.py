@@ -275,32 +275,6 @@ class GoPlusClient:
             result = payload.get("result") if isinstance(payload, dict) else None
             token = result.get("access_token") if isinstance(result, dict) else None
             expires = result.get("expires_in") if isinstance(result, dict) else None
-            # #region agent log
-            try:
-                import json as _json
-                from pathlib import Path as _Path
-                _tok = token if isinstance(token, str) else ""
-                _rec = {
-                    "sessionId": "1ea519",
-                    "hypothesisId": "A",
-                    "location": "goplus_client.py:_ensure_token",
-                    "message": "token exchange",
-                    "data": {
-                        "http": resp.status_code,
-                        "code": payload.get("code") if isinstance(payload, dict) else None,
-                        "message": payload.get("message") if isinstance(payload, dict) else None,
-                        "has_token": bool(_tok),
-                        "token_len": len(_tok),
-                        "token_head": _tok[:6] if _tok else "",
-                        "expires_in": expires,
-                    },
-                    "timestamp": int(time.time() * 1000),
-                }
-                with _Path("/Users/yang/Documents/tgbot/.cursor/debug-1ea519.log").open("a") as _f:
-                    _f.write(_json.dumps(_rec, ensure_ascii=True) + "\n")
-            except Exception:
-                pass
-            # #endregion
             if (
                 not isinstance(payload, dict)
                 or payload.get("code") != 1
@@ -360,54 +334,7 @@ class GoPlusClient:
         if not isinstance(payload, dict) or payload.get("code") != 1:
             code = payload.get("code") if isinstance(payload, dict) else None
             log.warning("goplus %s unexpected payload code=%s", network, code)
-            # #region agent log
-            try:
-                import json as _json
-                from pathlib import Path as _Path
-                _rec = {
-                    "sessionId": "1ea519",
-                    "hypothesisId": "B",
-                    "location": "goplus_client.py:_request",
-                    "message": "security payload not ok",
-                    "data": {
-                        "network": network,
-                        "http": resp.status_code,
-                        "code": code,
-                        "message": payload.get("message") if isinstance(payload, dict) else None,
-                        "auth_bearer": True,
-                        "n_addr": len(addresses),
-                    },
-                    "timestamp": int(time.time() * 1000),
-                }
-                with _Path("/Users/yang/Documents/tgbot/.cursor/debug-1ea519.log").open("a") as _f:
-                    _f.write(_json.dumps(_rec, ensure_ascii=True) + "\n")
-            except Exception:
-                pass
-            # #endregion
             return None
-        # #region agent log
-        try:
-            import json as _json
-            from pathlib import Path as _Path
-            _rec = {
-                "sessionId": "1ea519",
-                "hypothesisId": "B",
-                "location": "goplus_client.py:_request",
-                "message": "security payload ok",
-                "data": {
-                    "network": network,
-                    "http": resp.status_code,
-                    "code": payload.get("code"),
-                    "n_addr": len(addresses),
-                    "n_result": len(payload.get("result") or {}) if isinstance(payload.get("result"), dict) else 0,
-                },
-                "timestamp": int(time.time() * 1000),
-            }
-            with _Path("/Users/yang/Documents/tgbot/.cursor/debug-1ea519.log").open("a") as _f:
-                _f.write(_json.dumps(_rec, ensure_ascii=True) + "\n")
-        except Exception:
-            pass
-        # #endregion
         return payload
 
     async def check_many(
