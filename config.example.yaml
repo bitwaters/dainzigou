@@ -165,7 +165,7 @@ watch:
   confirm:
     confirm_min_buyers: 15
     min_buyer_seller_ratio: 1.5
-    min_buy_sell_ratio: 2.0
+    min_buy_sell_ratio: 1.5
     min_price_change_pct: 15
     sane_pct_min: -50                 # 越界视为缺失，不确认
     sane_pct_max: 500
