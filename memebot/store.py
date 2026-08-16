@@ -15,7 +15,7 @@ from pathlib import Path
 from shutil import copy2
 from typing import Any, TypeVar, cast
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 TABLES = (
     "pools",
     "signals",
@@ -138,8 +138,8 @@ CREATE TABLE IF NOT EXISTS symbol_counter (
   network TEXT NOT NULL,
   symbol_norm TEXT NOT NULL,
   hour_bucket TEXT NOT NULL,
-  cnt INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (network, symbol_norm, hour_bucket)
+  token_address TEXT NOT NULL,
+  PRIMARY KEY (network, symbol_norm, hour_bucket, token_address)
 );
 CREATE INDEX IF NOT EXISTS idx_symbol_counter_hour_bucket ON symbol_counter(hour_bucket);
 
@@ -171,6 +171,18 @@ CREATE TABLE IF NOT EXISTS runtime_kv (
   key TEXT PRIMARY KEY,
   value TEXT
 );
+"""
+
+_MIGRATE_2_SQL = """
+DROP TABLE IF EXISTS symbol_counter;
+CREATE TABLE symbol_counter (
+  network TEXT NOT NULL,
+  symbol_norm TEXT NOT NULL,
+  hour_bucket TEXT NOT NULL,
+  token_address TEXT NOT NULL,
+  PRIMARY KEY (network, symbol_norm, hour_bucket, token_address)
+);
+CREATE INDEX IF NOT EXISTS idx_symbol_counter_hour_bucket ON symbol_counter(hour_bucket);
 """
 
 T = TypeVar("T")
@@ -269,6 +281,8 @@ class Store:
                 for version in range(current + 1, SCHEMA_VERSION + 1):
                     if version == 1:
                         conn.executescript(_SCHEMA_SQL)
+                    elif version == 2:
+                        conn.executescript(_MIGRATE_2_SQL)
                     else:
                         raise RuntimeError(f"missing migration for user_version {version}")
                     conn.execute(f"PRAGMA user_version = {version}")
@@ -627,7 +641,7 @@ class Store:
     def symbol_count(self, network: str, symbol_norm: str, min_bucket: str) -> int:
         row = self.read(
             lambda c: c.execute(
-                "SELECT COALESCE(SUM(cnt), 0) AS n FROM symbol_counter "
+                "SELECT COUNT(*) AS n FROM symbol_counter "
                 "WHERE network = ? AND symbol_norm = ? AND hour_bucket >= ?",
                 (network, symbol_norm, min_bucket),
             ).fetchone()
@@ -875,17 +889,17 @@ class Store:
 
         self.submit(_fn)
 
-    def incr_symbol(self, network: str, symbol_norm: str, hour_bucket: str, n: int = 1) -> int:
+    def incr_symbol(
+        self, network: str, symbol_norm: str, hour_bucket: str, token_address: str
+    ) -> int:
         def _fn(conn: sqlite3.Connection) -> int:
             conn.execute(
-                "INSERT INTO symbol_counter(network, symbol_norm, hour_bucket, cnt) "
-                "VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(network, symbol_norm, hour_bucket) "
-                "DO UPDATE SET cnt = cnt + excluded.cnt",
-                (network, symbol_norm, hour_bucket, n),
+                "INSERT OR IGNORE INTO symbol_counter("
+                "network, symbol_norm, hour_bucket, token_address) VALUES (?, ?, ?, ?)",
+                (network, symbol_norm, hour_bucket, token_address),
             )
             row = conn.execute(
-                "SELECT cnt FROM symbol_counter "
+                "SELECT COUNT(*) AS n FROM symbol_counter "
                 "WHERE network = ? AND symbol_norm = ? AND hour_bucket = ?",
                 (network, symbol_norm, hour_bucket),
             ).fetchone()

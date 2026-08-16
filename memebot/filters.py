@@ -53,7 +53,7 @@ def record_symbols(store: Store, pools: list[PoolSnapshot], now: datetime) -> No
     bucket = now.astimezone(UTC).strftime("%Y-%m-%dT%H")
     for pool in pools:
         if pool.symbol_norm:
-            store.incr_symbol(pool.network, pool.symbol_norm, bucket)
+            store.incr_symbol(pool.network, pool.symbol_norm, bucket, pool.token_address)
 
 
 def eval_l0(pool: PoolSnapshot, raw: dict[str, Any], store: Store, now: datetime) -> FilterResult:
