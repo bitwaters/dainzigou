@@ -58,7 +58,7 @@ class AdminHandler:
         raw_offset = self.store.kv_get(OFFSET_KEY)
         offset = int(raw_offset) + 1 if raw_offset else None
         updates = await self.notifier.get_updates(offset=offset, timeout=0)
-        last_id = offset
+        last_id: int | None = None
         for upd in updates:
             if not isinstance(upd, dict):
                 continue

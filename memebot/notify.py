@@ -376,16 +376,15 @@ class Notifier:
         return result if isinstance(result, list) else []
 
     async def _send(self, chat_id: str, text: str, markup: dict[str, Any] | None) -> None:
+        body: dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+        }
+        if markup is not None:
+            body["reply_markup"] = markup
         try:
-            await self._client.post(
-                f"/bot{self.token}/sendMessage",
-                json={
-                    "chat_id": chat_id,
-                    "text": text,
-                    "parse_mode": "HTML",
-                    "reply_markup": markup,
-                },
-            )
+            await self._client.post(f"/bot{self.token}/sendMessage", json=body)
         except httpx.HTTPError as exc:
             log.warning("telegram alert failed: %s", exc)
 
