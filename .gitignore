@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+dist/
+*.egg-info/
+/data/
+*.db
+*.db-wal
+*.db-shm
+.env
+config.yaml
+.cursor/
+.probe-data/
+.DS_Store
+
+# Local tests and docs — keep off GitHub
+tests/
+docs/
+openspec/
+开发文档.md
+memebot/probe_appendix_b.py
+

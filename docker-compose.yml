@@ -1,0 +1,29 @@
+services:
+  memebot:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TZ: UTC
+      STOP_GRACE_PERIOD: "30"
+    volumes:
+      - memebot-data:/data
+      - ./config.yaml:/config/config.yaml:ro
+      - ./.env:/config/.env:ro
+    stop_grace_period: 30s
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-m", "memebot.healthcheck", "/data/heartbeat", "300"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 300s
+
+volumes:
+  memebot-data:

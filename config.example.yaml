@@ -1,0 +1,218 @@
+# Meme 币信号机 — 完整配置模板。复制为 config.yaml 后按环境修改。
+# 密钥不放本文件：COINGECKO_API_KEY、TELEGRAM_BOT_TOKEN、STOP_GRACE_PERIOD 走 .env。
+# 任一过滤/安全阈值设为 null 即禁用该规则。
+
+# ── 运行时与工程参数 ─────────────────────────────
+runtime:
+  log_level: INFO                     # DEBUG|INFO|WARNING|ERROR
+  http:
+    timeout_sec: 10
+    connect_timeout_sec: 5
+    max_connections: 10
+    user_agent: "memebot/1.0"
+  retry:
+    max_attempts: 3
+    backoff_base_sec: 1
+    backoff_factor: 3
+    backoff_max_sec: 30
+  rate_limit:
+    max_requests_per_min: 400         # 客户端自限，低于 API 的 500 留余量
+  shutdown:
+    grace_sec: 25                     # 必须 < docker STOP_GRACE_PERIOD
+  health:
+    heartbeat_interval_sec: 30
+    stale_after_sec: 300              # HEALTHCHECK 判定不健康的阈值
+    clock_skew_warn_sec: 60           # API 时间与本地时间偏差告警线
+
+paths:
+  db: "/data/memebot.db"
+  backup_dir: "/data/backups"
+  lock_file: "/data/memebot.lock"
+  heartbeat_file: "/data/heartbeat"
+
+# ── 采集 ────────────────────────────────────────
+networks: [solana, bsc]
+
+streams:
+  source: megafilter                  # megafilter | new_pools
+  megafilter:
+    enabled: true
+    interval_sec: 60
+    pages: 1
+    prefilter:                        # 服务端粗筛，须比本地门槛宽松一档
+      pool_created_hour_min: 0.2
+      pool_created_hour_max: 50
+      reserve_in_usd_min: 10000
+      sort: pool_created_at_desc
+  new_pools:                          # 回退方案，source=new_pools 时生效
+    enabled: false
+    interval_sec: 60
+    pages: 1
+    maturation_queue:
+      enabled: true
+      recheck_batch_size: 50
+      max_queue_size: 2000
+  trending_5m:
+    enabled: true
+    interval_sec: 120
+    duration: 5m
+    pages: 1
+  trending_1h:
+    enabled: true
+    interval_sec: 120
+    duration: 1h
+    pages: 1
+
+# ── 第0层：采集过滤（免费字段）──────────────────
+collection_gates:
+  quote_tokens:                       # 必须是合约地址，不是符号
+    solana:
+      - "So11111111111111111111111111111111111111112"   # WSOL
+      - "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"   # USDC
+    bsc:
+      - "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c"     # WBNB
+      - "0x55d398326f99059ff775485246999027b3197955"     # USDT
+      - "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d"     # USDC
+  min_reserve_usd: 20000
+  max_fdv_usd: 50000000
+  max_fdv_to_reserve: 500
+  max_turnover_ratio:
+    window: m15
+    max: 10
+  anti_wash:
+    window: m15
+    min_buyers_to_buys: 0.15
+    min_buyers_m15: 8
+  copycat:
+    enabled: true
+    lookback_h: 24
+    max_same_symbol: 3
+  max_sus_reports: 0
+
+# ── 第1层：业务门槛（免费字段）──────────────────
+business_gates:
+  min_age_min: 15
+  max_age_h: 48
+  min_volume:
+    window: m15
+    usd: 2000
+
+# ── 第2层：安全门禁（付费）──────────────────────
+security:
+  batch:
+    enabled: true
+    size: 50
+    min_main_pool_share: 0.5
+    cache:
+      graduated_ttl_min: null         # null = 永久
+      ungraduated_recheck_min: 30
+      main_pool_share_ttl_min: 30
+  cache_hours: 24
+  honeypot_policy: reject_true        # reject_true | reject_unknown | off
+  reject_ungraduated: true
+  holders_max_staleness_h: 6
+  unknown_policy:                     # reject | pass_and_log
+    dev_holding: pass_and_log
+    top10_holding: pass_and_log
+    holders_count: pass_and_log
+  rules:
+    solana:
+      mint_authority: "no"
+      freeze_authority: "no"
+      max_dev_holding_pct: 10
+      max_top10_holding_pct: 60
+      min_holders: 10
+    bsc:
+      max_dev_holding_pct: 10
+      max_top10_holding_pct: 60
+      min_holders: 10
+
+# ── 打分（四维，权重和必须为 1.0）───────────────
+scoring:
+  combine: normalize_then_weight
+  momentum:
+    weight: 0.35
+    use_native_price: false
+    penalty_above_pct: null
+    windows:
+      - {window: m5,  weight: 0.5, normalize: {type: saturate, half: 30}}
+      - {window: m15, weight: 0.3, normalize: {type: saturate, half: 50}}
+      - {window: h1,  weight: 0.2, normalize: {type: saturate, half: 100}}
+  buy_pressure:
+    weight: 0.30
+    window: m15
+  turnover:
+    weight: 0.20
+    window: m15
+    normalize: {type: saturate, half: 4.0}
+    penalty_above: null
+  freshness:
+    weight: 0.15
+    normalize: {type: exp_decay, half_life_min: 240}
+  candidates_per_chain_per_cycle: 2
+
+# ── 盯盘 ────────────────────────────────────────
+watch:
+  poll_interval_sec: 60
+  max_concurrent: 10
+  min_dwell_sec: 180
+  window_min: 20
+  min_trade_usd: 10
+  confirm:
+    confirm_min_buyers: 15
+    min_buyer_seller_ratio: 1.5
+    min_buy_sell_ratio: 2.0
+    min_price_change_pct: 15
+  timeout_cooldown:
+    max_timeouts: 2
+    cooldown_h: 2
+  full_policy: evict_lowest
+  daily_call_cap: 3000
+
+# ── 结果追踪 ────────────────────────────────────
+tracking:
+  enabled: true
+  track_negatives: true
+  evaluate_after_h: 24
+  scan_interval_h: 1
+  granularity:
+    early: {tf: minute, agg: 1,  hours: 1}
+    full:  {tf: minute, agg: 15, hours: 24}
+  rug:
+    reserve_drop_pct: 80              # Phase 1 忽略，只做价格回撤
+    price_drawdown_pct: 90
+    confirm_hours: 4
+
+# ── 额度守护 ────────────────────────────────────
+budget:
+  global_daily_call_cap: 8000
+  monthly_credit_warn_pct: 60
+
+# ── Telegram ────────────────────────────────────
+telegram:
+  channel_id: "-100xxx"
+  admin_id: "12345"
+  pending_ttl_sec: 180
+  max_send_failures: 3
+  send_timeout_sec: 10
+  alert_silence_sec: 600
+  consecutive_failure_alert: 5
+  symbol_max_len: 24
+
+# ── 存储 ────────────────────────────────────────
+storage:
+  pools_retain_h: 48
+  watch_log_retain_days: 30
+  outcomes_raw_retain_days: 30
+  credit_usage_retain_days: 400
+  event_log_retain_days: 7
+  cleanup_interval_h: 1
+  vacuum_interval_h: 168
+  wal_autocheckpoint_pages: 1000
+  wal_truncate_interval_h: 24
+
+# ── 复盘日报 ────────────────────────────────────
+report:
+  enabled: true
+  daily_at_utc: "00:30"
+  zero_signal_alert_days: 2
