@@ -108,10 +108,14 @@ _REQUIRED_PATHS = (
     "streams.trending_5m.interval_sec",
     "streams.trending_5m.duration",
     "streams.trending_5m.pages",
+    "streams.trending_5m.max_fdv_usd",
+    "streams.trending_5m.max_age_h",
     "streams.trending_1h.enabled",
     "streams.trending_1h.interval_sec",
     "streams.trending_1h.duration",
     "streams.trending_1h.pages",
+    "streams.trending_1h.max_fdv_usd",
+    "streams.trending_1h.max_age_h",
     "collection_gates.quote_tokens",
     "collection_gates.min_reserve_usd",
     "collection_gates.max_fdv_usd",
@@ -437,6 +441,24 @@ def validate(raw: dict[str, Any], stop_grace_period: float) -> None:
             "watch.confirm.min_price_change_pct",
             "must be <= watch.confirm.sane_pct_max",
         )
+
+    base_fdv = _need(raw, "collection_gates.max_fdv_usd")
+    base_age = _need(raw, "business_gates.max_age_h")
+    for name in ("trending_5m", "trending_1h"):
+        fdv_path = f"streams.{name}.max_fdv_usd"
+        age_path = f"streams.{name}.max_age_h"
+        ov_fdv = _need(raw, fdv_path)
+        ov_age = _need(raw, age_path)
+        if ov_fdv is not None:
+            n_fdv = _as_number(fdv_path, ov_fdv)
+            if base_fdv is not None:
+                base = _as_number("collection_gates.max_fdv_usd", base_fdv)
+                if n_fdv < base:
+                    raise ConfigError(fdv_path, "must be >= collection_gates.max_fdv_usd")
+        if ov_age is not None:
+            n_age = _as_number(age_path, ov_age)
+            if base_age is not None and n_age < _as_number("business_gates.max_age_h", base_age):
+                raise ConfigError(age_path, "must be >= business_gates.max_age_h")
 
 
 def load_config(config_path: Path, env_path: Path | None = None) -> AppConfig:

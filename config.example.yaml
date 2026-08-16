@@ -59,11 +59,15 @@ streams:
     interval_sec: 120
     duration: 5m
     pages: 1
+    max_fdv_usd: 500000               # 覆盖全局；null = 继承 collection_gates
+    max_age_h: 12                     # 覆盖全局；null = 继承 business_gates
   trending_1h:
-    enabled: true
+    enabled: false                    # 默认关；更易已走完一波
     interval_sec: 120
     duration: 1h
     pages: 1
+    max_fdv_usd: 500000
+    max_age_h: 12
 
 # ── 第0层：采集过滤（免费字段）──────────────────
 collection_gates:

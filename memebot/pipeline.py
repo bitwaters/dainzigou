@@ -43,10 +43,11 @@ def drop_recently_seen(
             del recent[pid]
     out: list[PoolSnapshot] = []
     for pool in pools:
-        last = recent.get(pool.pool_id)
+        key = f"{pool.source}:{pool.pool_id}"
+        last = recent.get(key)
         if last is not None and last >= cutoff:
             continue
-        recent[pool.pool_id] = now
+        recent[key] = now
         out.append(pool)
     return out
 

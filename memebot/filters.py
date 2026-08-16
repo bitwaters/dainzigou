@@ -16,6 +16,13 @@ def _disabled(value: Any) -> bool:
     return value is None
 
 
+def source_gate(pool: PoolSnapshot, raw: dict[str, Any], key: str, fallback: Any) -> Any:
+    stream = (raw.get("streams") or {}).get(pool.source)
+    if isinstance(stream, dict) and stream.get(key) is not None:
+        return stream[key]
+    return fallback
+
+
 def _as_float(value: Any) -> float | None:
     if value is None or value == "":
         return None
@@ -69,7 +76,7 @@ def eval_l0(pool: PoolSnapshot, raw: dict[str, Any], store: Store, now: datetime
         pool.reserve_usd is None or pool.reserve_usd < float(min_reserve)
     ):
         return FilterResult(pool, "min_reserve_usd")
-    max_fdv = gates.get("max_fdv_usd")
+    max_fdv = source_gate(pool, raw, "max_fdv_usd", gates.get("max_fdv_usd"))
     if not _disabled(max_fdv) and pool.fdv_usd is not None and pool.fdv_usd > float(max_fdv):
         return FilterResult(pool, "max_fdv_usd")
     ratio_cap = gates.get("max_fdv_to_reserve")
@@ -122,7 +129,7 @@ def eval_l0(pool: PoolSnapshot, raw: dict[str, Any], store: Store, now: datetime
 def eval_l1(pool: PoolSnapshot, raw: dict[str, Any], now: datetime) -> FilterResult:
     gates = raw["business_gates"]
     min_age = gates.get("min_age_min")
-    max_age_h = gates.get("max_age_h")
+    max_age_h = source_gate(pool, raw, "max_age_h", gates.get("max_age_h"))
     if pool.pool_created_at is None:
         return FilterResult(pool, "missing_pool_created_at")
     age_min = (now.astimezone(UTC) - pool.pool_created_at.astimezone(UTC)).total_seconds() / 60
