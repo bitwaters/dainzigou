@@ -179,6 +179,7 @@ def _pool_from_record(rec: dict[str, Any]) -> PoolSnapshot:
         pool_created_at=created,
         reserve_usd=rec.get("reserve_usd"),
         fdv_usd=rec.get("fdv_usd"),
+        market_cap_usd=rec.get("market_cap_usd"),
         price_usd=rec.get("price_usd"),
         price_native=rec.get("price_native"),
         volume=dict(rec.get("volume") or {}),
@@ -375,8 +376,8 @@ async def process_batches(
     for pool in pools:
         funnel.add_once("stream", "_raw", pool.pool_id, pool.source)
     survivors = run_l0_l1(pools, raw, store, now, funnel)
-    survivors = await run_l2a(survivors, raw, store, client, now, funnel)
     card_fields: dict[tuple[str, str], dict[str, Any]] = {}
+    survivors = await run_l2a(survivors, raw, store, client, now, funnel, card_fields)
     survivors = await run_l2b(
         survivors, raw, store, client, now, funnel, card_fields=card_fields
     )

@@ -38,6 +38,7 @@ def payload_from_signal_row(row: Any) -> dict[str, Any]:
         "fdv_usd": (
             row["fdv_at_signal"] if row["fdv_at_signal"] is not None else feats.get("fdv_usd")
         ),
+        "market_cap_usd": feats.get("market_cap_usd"),
         "reserve_usd": feats.get("reserve_usd"),
         "age_min": feats.get("age_min"),
         "holders": feats.get("holders"),
@@ -171,9 +172,7 @@ def _windows_line(chg: Any) -> str | None:
 
 def _security_line(payload: dict[str, Any], network: str) -> str:
     parts: list[str] = []
-    if network == "solana":
-        parts.append("蜜罐 未检测")
-    else:
+    if network != "solana":
         hp = payload.get("honeypot")
         if hp is True:
             parts.append("蜜罐 是")
@@ -201,8 +200,11 @@ def render_signal(payload: dict[str, Any], raw: dict[str, Any]) -> tuple[str, di
     lines = [f"🚀 确认  ${symbol}", f"{html.escape(chain)} · 池龄 {age}", ""]
     lines.append(f"<code>{ca}</code>")
     money: list[str] = []
+    mc = fmt_usd(payload.get("market_cap_usd"))
     fdv = fmt_usd(payload.get("fdv_usd"))
     liq = fmt_usd(payload.get("reserve_usd"))
+    if mc:
+        money.append(f"市值 {mc}")
     if fdv:
         money.append(f"FDV {fdv}")
     if liq:

@@ -520,6 +520,12 @@ def validate(raw: dict[str, Any], stop_grace_period: float) -> None:
         if score_n < 0 or score_n > 1:
             raise ConfigError("scoring.min_admit_score", "must be between 0 and 1")
 
+    bsc_rules = _need(raw, "security.rules.bsc")
+    if isinstance(bsc_rules, dict) and bsc_rules.get("min_gt_score") is not None:
+        gt_min = _as_number("security.rules.bsc.min_gt_score", bsc_rules["min_gt_score"])
+        if gt_min < 0 or gt_min > 100:
+            raise ConfigError("security.rules.bsc.min_gt_score", "must be between 0 and 100")
+
     horizons = _need(raw, "tracking.horizons")
     if not isinstance(horizons, list) or not horizons:
         raise ConfigError("tracking.horizons", "must be a non-empty list")

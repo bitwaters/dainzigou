@@ -61,6 +61,7 @@ class PoolSnapshot:
     pool_created_at: datetime | None
     reserve_usd: float | None
     fdv_usd: float | None
+    market_cap_usd: float | None
     price_usd: float | None
     price_native: float | None
     volume: dict[str, float]
@@ -177,6 +178,7 @@ def parse_pools(payload: dict[str, Any], source: str) -> list[PoolSnapshot]:
                 pool_created_at=parse_ts(attrs.get("pool_created_at")),
                 reserve_usd=_f(attrs.get("reserve_in_usd")),
                 fdv_usd=_f(attrs.get("fdv_usd")),
+                market_cap_usd=_f(attrs.get("market_cap_usd")),
                 price_usd=_f(attrs.get("base_token_price_usd")),
                 price_native=_f(attrs.get("base_token_price_native_currency")),
                 volume=volume,

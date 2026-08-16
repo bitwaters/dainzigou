@@ -209,6 +209,7 @@ async def run_l2a(
     client: CgClient,
     now: datetime,
     funnel: Funnel,
+    card_fields: dict[tuple[str, str], dict[str, Any]] | None = None,
 ) -> list[PoolSnapshot]:
     sec = raw["security"]
     batch_cfg = sec["batch"]
@@ -264,6 +265,11 @@ async def run_l2a(
                 launch = as_dict(attrs.get("launchpad_details"))
                 completed = launch.get("completed")
                 total = _as_float(attrs.get("total_reserve_in_usd"))
+                mc = _as_float(attrs.get("market_cap_usd"))
+                if card_fields is not None and mc is not None:
+                    card_fields.setdefault((pool.network, pool.token_address), {})[
+                        "market_cap_usd"
+                    ] = mc
                 share = None
                 if total and total > 0 and pool.reserve_usd is not None:
                     share = pool.reserve_usd / total
@@ -430,6 +436,10 @@ def eval_l2b_info(
     for field, expected in (("mint_authority", "no"), ("freeze_authority", "no")):
         if field in rules and attrs.get(field) != expected:
             return False, field
+    if "min_gt_score" in rules and not _disabled(rules["min_gt_score"]):
+        gt = _as_float(attrs.get("gt_score"))
+        if gt is not None and gt < float(rules["min_gt_score"]):
+            return False, "min_gt_score"
     holders = as_dict(attrs.get("holders"))
     unknown = sec.get("unknown_policy") or {}
     stale_h = sec.get("holders_max_staleness_h")

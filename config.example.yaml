@@ -142,6 +142,7 @@ security:
       max_dev_holding_pct: 15
       max_top10_holding_pct: 80
       min_holders: 10
+      min_gt_score: 25                # GT 下限兜底 rug 概率，见开发文档 §3.4.2
 
 # ── 打分（四维，权重和必须为 1.0）───────────────
 scoring:

@@ -275,6 +275,9 @@ class Runtime:
         tx = sess.features.get("tx") or {}
         pool_buyers_m15 = (tx.get("m15") or {}).get("buyers")
         fdv_now = scale_from_baseline(sess.features.get("fdv_usd"), sess.baseline, last_price)
+        mc_now = scale_from_baseline(
+            sess.features.get("market_cap_usd"), sess.baseline, last_price
+        )
         age_admit = sess.features.get("age_min")
         age_now = None
         if age_admit is not None:
@@ -289,6 +292,7 @@ class Runtime:
             "pool_address": sess.address,
             "created_at": now.isoformat(),
             "fdv_usd": fdv_now,
+            "market_cap_usd": mc_now,
             "reserve_usd": sess.features.get("reserve_usd"),
             "age_min": age_now,
             "buyers": stats.buyers,
@@ -315,6 +319,7 @@ class Runtime:
                 "buy_sell_ratio": stats.buy_sell_ratio,
                 "price_change_pct": stats.price_change_pct,
                 "fdv_usd": fdv_now,
+                "market_cap_usd": mc_now,
             }
         )
         sid = self.notifier.try_insert_pending(

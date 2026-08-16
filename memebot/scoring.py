@@ -88,6 +88,7 @@ def extract_features(
         "price_native": pool.price_native,
         "reserve_usd": pool.reserve_usd,
         "fdv_usd": pool.fdv_usd,
+        "market_cap_usd": pool.market_cap_usd,
         "age_min": age,
         "volume": pool.volume,
         "tx": pool.tx,
