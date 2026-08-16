@@ -103,6 +103,7 @@ class AdminHandler:
         last_ok = self.store.kv_get("last_collection_ok_at") or "—"
         lines = [
             "状态",
+            f"实例 {self.store.kv_get('instance_id') or '—'}",
             f"启动 {_fmt_dt(started)}",
             f"最近采集 {_fmt_dt(last_ok)}",
             f"在盯 {len(self.watcher.sessions)} · 悬挂 {len(self.store.hanging_watches())}",
