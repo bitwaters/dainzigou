@@ -6,12 +6,11 @@ services:
       - .env
     environment:
       TZ: UTC
-      STOP_GRACE_PERIOD: "30"
     volumes:
       - memebot-data:/data
       - ./config.yaml:/config/config.yaml:ro
       - ./.env:/config/.env:ro
-    stop_grace_period: 30s
+    stop_grace_period: 35s
     mem_limit: 512m
     logging:
       driver: json-file

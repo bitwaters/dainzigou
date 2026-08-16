@@ -1,12 +1,10 @@
-# Meme 币信号机 — 完整配置模板。复制为 config.yaml 后按环境修改。
-# 密钥与频道身份不放本文件，走 .env：
-#   COINGECKO_API_KEY、TELEGRAM_BOT_TOKEN、TELEGRAM_ADMIN_ID、TELEGRAM_CHANNEL_ID、STOP_GRACE_PERIOD
-# 下面 telegram.admin_id / channel_id 只是占位；启动时会被 .env 覆盖。
-# 任一过滤/安全阈值设为 null 即禁用该规则。
+# 动量信号机配置模板。复制为 config.yaml 后填入真实频道 ID。
+# 密钥只走 .env：COINGECKO_API_KEY、GOPLUS_APP_KEY、GOPLUS_APP_SECRET、TELEGRAM_BOT_TOKEN、TELEGRAM_ADMIN_ID
 
-# ── 运行时与工程参数 ─────────────────────────────
+networks: [solana, bsc]
+
 runtime:
-  log_level: INFO                     # DEBUG|INFO|WARNING|ERROR
+  log_level: INFO
   http:
     timeout_sec: 10
     connect_timeout_sec: 5
@@ -18,227 +16,101 @@ runtime:
     backoff_factor: 3
     backoff_max_sec: 30
   rate_limit:
-    max_requests_per_min: 400         # 客户端自限，低于 API 的 500 留余量
+    max_requests_per_min: 400
   shutdown:
-    grace_sec: 25                     # 必须 < docker STOP_GRACE_PERIOD
+    grace_sec: 25
   health:
     heartbeat_interval_sec: 30
-    stale_after_sec: 300              # HEALTHCHECK 判定不健康的阈值
-    clock_skew_warn_sec: 60           # API 时间与本地时间偏差告警线
+    stale_after_sec: 300
+    clock_skew_warn_sec: 60
 
 paths:
-  db: "/data/memebot.db"
+  db: "/data/momentum.db"
   backup_dir: "/data/backups"
   lock_file: "/data/memebot.lock"
   heartbeat_file: "/data/heartbeat"
 
-# ── 采集 ────────────────────────────────────────
-networks: [solana, bsc]
-
 streams:
-  source: megafilter                  # megafilter | new_pools
-  megafilter:
+  momentum:
     enabled: true
-    interval_sec: 30                  # 贴近 30s 付费缓存下限
-    pages: 3                          # 页数，从第 1 页循环到第 N 页
-    prefilter:                        # 服务端粗筛，须比本地门槛宽松一档
-      pool_created_hour_min: 0.08
-      pool_created_hour_max: 8
-      reserve_in_usd_min: 10000
-      sort: pool_created_at_desc
-  rising:                             # 上涨雷达：服务端按涨幅过滤，见开发文档 §3.1.4
-    enabled: true
-    interval_sec: 60
-    pages: 2
+    interval_sec: 30
+    pages: 3
     prefilter:
-      sort: h1_price_change_percentage_desc
+      sort: m5_price_change_percentage_desc
       price_change_percentage_min: 10
-      price_change_percentage_duration: 1h
-    max_fdv_usd: 2000000              # 与 trending 对齐；涨得高的池 FDV 高
-    max_age_h: null                   # null = 继承 business_gates
-  new_pools:                          # 回退方案，source=new_pools 时生效
-    enabled: false
-    interval_sec: 60
-    pages: 1
-    maturation_queue:
-      enabled: true
-      recheck_batch_size: 50
-      max_queue_size: 2000
+      price_change_percentage_duration: 5m
+      reserve_in_usd_min: 10000
+      pool_created_hour_min: 0
+      pool_created_hour_max: 8760
   trending_5m:
     enabled: true
     interval_sec: 45
-    duration: 5m
     pages: 2
-    max_fdv_usd: 2000000              # 覆盖全局；null = 继承 collection_gates
-    max_age_h: 24                     # 覆盖全局；null = 继承 business_gates
   trending_1h:
-    enabled: true                     # 开发期默认开
+    enabled: true
     interval_sec: 90
-    duration: 1h
     pages: 1
-    max_fdv_usd: 2000000
-    max_age_h: 24
 
-# ── 第0层：采集过滤（免费字段）──────────────────
-collection_gates:
-  quote_tokens:                       # 必须是合约地址，不是符号
-    solana:
-      - "So11111111111111111111111111111111111111112"   # WSOL
-      - "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"   # USDC
-    bsc:
-      - "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c"     # WBNB
-      - "0x55d398326f99059ff775485246999027b3197955"     # USDT
-      - "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d"     # USDC
+radar:
+  min_m5_pct: 15
+
+gates:
   min_reserve_usd: 15000
-  max_fdv_usd: 800000
-  max_fdv_to_reserve: 500
-  max_turnover_ratio:
-    window: m15
-    max: 10
-  anti_wash:
-    window: m15
-    min_buyers_to_buys: 0.15
-    min_buyers_m15: 6
-  copycat:
-    enabled: true
-    lookback_h: 24
-    max_same_symbol: 5                # 同名潮是 meme 叙事常态
-  max_sus_reports: 0
-
-# ── 第1层：业务门槛（免费字段）──────────────────
-business_gates:
-  min_age_min: 10                     # 调整时须同步 megafilter.prefilter
-  max_age_h: 6
-  min_volume:
-    window: m15
-    usd: 2000
-
-# ── 第2层：安全门禁（付费）──────────────────────
-security:
-  batch:
-    enabled: true
-    size: 50
-    min_main_pool_share: 0.5
-    cache:                            # 开发期以时效为先
-      graduated_ttl_min: null         # null = 永久
-      ungraduated_recheck_min: 5
-      main_pool_share_ttl_min: 5
-  cache_hours: 1                      # 开发期 1h：安全属性时效优先
-  honeypot_policy: reject_true        # reject_true | reject_unknown | off
-  reject_ungraduated: true
-  holders_max_staleness_h: 6
-  unknown_policy:                     # reject | pass_and_log
-    dev_holding: pass_and_log
-    top10_holding: pass_and_log
-    holders_count: pass_and_log
-  rules:
+  quote_tokens:
     solana:
-      mint_authority: "no"
-      freeze_authority: "no"
-      max_dev_holding_pct: 15
-      max_top10_holding_pct: 80
-      min_holders: 10
+      - "So11111111111111111111111111111111111111112"
+      - "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
     bsc:
-      max_dev_holding_pct: 15
-      max_top10_holding_pct: 80
-      min_holders: 10
-      min_gt_score: 25                # GT 下限兜底 rug 概率，见开发文档 §3.4.2
+      - "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c"
+      - "0x55d398326f99059ff775485246999027b3197955"
+      - "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d"
 
-# ── 打分（四维，权重和必须为 1.0）───────────────
-scoring:
-  combine: normalize_then_weight
-  momentum:
-    weight: 0.35
-    use_native_price: false
-    penalty_above_pct: null
-    windows:
-      - {window: m5,  weight: 0.5, normalize: {type: saturate, half: 30}}
-      - {window: m15, weight: 0.3, normalize: {type: saturate, half: 50}}
-      - {window: h1,  weight: 0.2, normalize: {type: saturate, half: 100}}
-  buy_pressure:
-    weight: 0.30
-    window: m15
-  turnover:
-    weight: 0.20
-    window: m15
-    normalize: {type: saturate, half: 4.0}
-    penalty_above: null
-  freshness:
-    weight: 0.15
-    normalize: {type: exp_decay, half_life_min: 240}
-  min_admit_score: 0.25               # 低于此分不进盯盘；null = 禁用
-  candidates_per_chain_per_cycle: 3
+security:
+  cache_ttl_min: 60
+  transient_ttl_sec: 120
+  max_tax_pct: 10
+  timeout_sec: 8
+  batch_size: 30
 
-# ── 盯盘 ────────────────────────────────────────
-watch:
-  poll_interval_sec: 10               # /trades 无缓存；官方建议 ≥10s
-  max_concurrent: 15
-  min_dwell_sec: 120
-  window_min: 15
-  min_trade_usd: 10                   # 粉尘过滤
-  admit:
-    min_m5_pct: 0                     # null = 禁用；缺 m5 视为未绿
-    min_m5_pct_on_red_m15: 10         # m15<0 时的 m5 下限；null = 与 min_m5_pct 相同
-    min_m15_pct: null                 # 额外 m15 门，默认关
-  confirm:
-    confirm_min_buyers: 12
-    min_buyer_seller_ratio: 1.5
-    min_buy_sell_ratio: 1.5
-    min_price_change_pct: 0           # 相对进场未跌即可
-    max_drawdown_from_peak_pct: 25    # 相对本窗口最高价回撤则 timeout；null = 禁用
-    sane_pct_min: -50                 # 越界视为缺失，不确认
-    sane_pct_max: 500
-  timeout_cooldown:
-    max_timeouts: 2
-    cooldown_h: 2
-  full_policy: evict_lowest
-  daily_call_cap: 30000               # 开发期护栏而非预算约束
+grade:
+  ohlcv_limit: 30
+  near_high_bars: 5
+  weak_min_1m_pct: 3
+  strong_min_1m_pct: 6
+  strong_min_1m_to_h1: 0.15
+  strong_min_1m_to_m5: 0.3
+  strong_max_dist_pct: 5
+  weak_max_dist_pct: 10
+  trade_lookback_sec: 60
+  min_trade_usd: 10
+  require_net_buy: true
 
-# ── 结果追踪 ────────────────────────────────────
-tracking:
-  enabled: true
-  track_negatives: true
+legs:
+  end_drawdown_pct: 25
+  max_inactive_h: 24
+
+tracker:
+  after_h: 1
   scan_interval_h: 1
-  horizons:                           # 多周期评估，每对象合计 3 credits
-    - {after_h: 1,  tf: minute, agg: 1,  limit: 60}
-    - {after_h: 6,  tf: minute, agg: 5,  limit: 72}
-    - {after_h: 24, tf: minute, agg: 15, limit: 96}
-  rug:
-    reserve_drop_pct: 80              # Phase 1 忽略，只做价格回撤
-    price_drawdown_pct: 90
-    confirm_hours: 4
+  drawdown_pct: 50
+  max_attempts: 3
 
-# ── 额度守护 ────────────────────────────────────
 budget:
-  global_daily_call_cap: 50000
-  monthly_credit_warn_pct: 60
+  cg_daily_call_cap: 80000
 
-# ── Telegram ────────────────────────────────────
 telegram:
-  channel_id: "-100xxx"               # 占位，启动时用 TELEGRAM_CHANNEL_ID
-  admin_id: "12345"                   # 占位，启动时用 TELEGRAM_ADMIN_ID
+  strong_channel_id: "-100xxx"
+  weak_channel_id: "-100xxx"
   pending_ttl_sec: 180
   max_send_failures: 3
   send_timeout_sec: 10
   alert_silence_sec: 600
-  consecutive_failure_alert: 5
   symbol_max_len: 24
-  admin_poll_interval_sec: 20         # getUpdates 短轮询间隔，见开发文档 §3.8.4
+  admin_poll_interval_sec: 20
 
-# ── 存储 ────────────────────────────────────────
 storage:
-  pools_retain_h: 48
-  watch_log_retain_days: 30
-  outcomes_raw_retain_days: 30
-  credit_usage_retain_days: 400
-  event_log_retain_days: 7
-  cleanup_interval_h: 1
-  vacuum_interval_h: 168
   wal_autocheckpoint_pages: 1000
-  wal_truncate_interval_h: 24
-
-# ── 复盘日报 ────────────────────────────────────
-report:
-  enabled: true
-  daily_at_utc: "00:30"
-  zero_signal_alert_days: 2
+  cleanup_interval_h: 1
+  outcomes_retain_days: 30
+  event_log_retain_days: 7
+  legs_retain_days: 30

@@ -62,7 +62,6 @@ class CgSettings:
     backoff_factor: float
     backoff_max_sec: float
     max_requests_per_min: int
-    batch_size: int
 
     @classmethod
     def from_app(cls, cfg: AppConfig) -> CgSettings:
@@ -76,7 +75,6 @@ class CgSettings:
             backoff_factor=float(cfg.get("runtime.retry.backoff_factor")),
             backoff_max_sec=float(cfg.get("runtime.retry.backoff_max_sec")),
             max_requests_per_min=int(cfg.get("runtime.rate_limit.max_requests_per_min")),
-            batch_size=int(cfg.get("security.batch.size")),
         )
 
 
@@ -258,9 +256,6 @@ class CgClient:
         }
         return await self.request("/onchain/networks/trending_pools", "collect", params)
 
-    async def new_pools(self, *, page: int) -> dict[str, Any]:
-        return await self.request("/onchain/networks/new_pools", "collect", {"page": page})
-
     async def trades(
         self,
         network: str,
@@ -275,20 +270,7 @@ class CgClient:
             f"/onchain/networks/{quote(network, safe='')}"
             f"/pools/{quote(pool_address, safe='')}/trades"
         )
-        return await self.request(path, "watch", params or None)
-
-    async def tokens_multi(self, network: str, addresses: list[str]) -> dict[str, Any]:
-        if not addresses:
-            return {"data": []}
-        if len(addresses) > self.settings.batch_size:
-            raise CgError("tokens/multi batch exceeds security.batch.size")
-        joined = ",".join(addresses)
-        path = f"/onchain/networks/{quote(network, safe='')}/tokens/multi/{quote(joined, safe=',')}"
-        return await self.request(path, "security")
-
-    async def token_info(self, network: str, address: str) -> dict[str, Any]:
-        path = f"/onchain/networks/{quote(network, safe='')}/tokens/{quote(address, safe='')}/info"
-        return await self.request(path, "security")
+        return await self.request(path, "trades", params or None)
 
     async def token_ohlcv(
         self,
@@ -315,4 +297,31 @@ class CgClient:
             params["limit"] = limit
         if before_timestamp is not None:
             params["before_timestamp"] = before_timestamp
-        return await self.request(path, "track", params)
+        return await self.request(path, "ohlcv", params)
+
+    async def pool_ohlcv(
+        self,
+        network: str,
+        pool_address: str,
+        timeframe: str,
+        *,
+        aggregate: int,
+        include_empty_intervals: bool = True,
+        limit: int | None = None,
+        currency: str = "usd",
+        before_timestamp: int | None = None,
+    ) -> dict[str, Any]:
+        path = (
+            f"/onchain/networks/{quote(network, safe='')}/pools/"
+            f"{quote(pool_address, safe='')}/ohlcv/{quote(timeframe, safe='')}"
+        )
+        params: dict[str, Any] = {
+            "aggregate": aggregate,
+            "include_empty_intervals": str(include_empty_intervals).lower(),
+            "currency": currency,
+        }
+        if limit is not None:
+            params["limit"] = limit
+        if before_timestamp is not None:
+            params["before_timestamp"] = before_timestamp
+        return await self.request(path, "ohlcv", params)

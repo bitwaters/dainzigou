@@ -20,15 +20,6 @@ def _f(value: Any) -> float | None:
         return None
 
 
-def _i(value: Any) -> int | None:
-    if value is None or value == "":
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
 def parse_ts(raw: Any) -> datetime | None:
     if not isinstance(raw, str) or not raw:
         return None
@@ -36,16 +27,6 @@ def parse_ts(raw: Any) -> datetime | None:
         return datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
         return None
-
-
-def normalize_symbol(symbol: str) -> str:
-    lowered = symbol.lower()
-    chars: list[str] = []
-    for ch in lowered:
-        o = ord(ch)
-        if ch.isalnum() and not (0x200B <= o <= 0x200F or 0x202A <= o <= 0x202E):
-            chars.append(ch)
-    return "".join(chars)
 
 
 @dataclass
@@ -68,12 +49,6 @@ class PoolSnapshot:
     tx: dict[str, dict[str, float]]
     price_change_usd: dict[str, float | None]
     price_change_native: dict[str, float | None] = field(default_factory=dict)
-    sus_reports: int | None = None
-    included_tokens: dict[str, dict[str, Any]] = field(default_factory=dict)
-
-    @property
-    def symbol_norm(self) -> str:
-        return normalize_symbol(self.symbol)
 
 
 def _included_map(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -185,8 +160,6 @@ def parse_pools(payload: dict[str, Any], source: str) -> list[PoolSnapshot]:
                 tx=tx,
                 price_change_usd=changes,
                 price_change_native=native_changes,
-                sus_reports=_i(attrs.get("community_sus_report")),
-                included_tokens=inc,
             )
         )
     return out

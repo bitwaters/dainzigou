@@ -1,8 +1,9 @@
-"""SQLite persistence: schema, forward migrations, single writer thread."""
+"""SQLite persistence: new momentum schema, WAL, single writer thread."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import queue
 import sqlite3
 import threading
@@ -15,144 +16,115 @@ from pathlib import Path
 from shutil import copy2
 from typing import Any, TypeVar, cast
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 1
 TABLES = (
-    "pools",
-    "signals",
-    "watch_log",
-    "signal_outcomes",
     "security_cache",
-    "token_batch_cache",
-    "symbol_counter",
+    "legs",
+    "signals",
+    "step_counts",
+    "signal_outcomes",
     "credit_usage",
+    "kv",
     "event_log",
-    "funnel_counts",
-    "funnel_seen",
-    "runtime_kv",
 )
-FUNNEL_LAYERS = frozenset({"stream", "l0", "l1", "l2a", "l2b", "scoring", "watch"})
-CREDIT_KINDS = frozenset({"collect", "security", "watch", "track"})
+STEP_NAMES = frozenset(
+    {
+        "radar_input",
+        "gate_chain",
+        "gate_quote",
+        "gate_liq",
+        "gate_m5",
+        "security_reject",
+        "security_transient",
+        "grade_input",
+        "ohlcv_fail",
+        "trades_fail",
+        "net_buy_nonpositive",
+        "pullback",
+        "grade_none",
+        "pushed_strong",
+        "pushed_weak",
+    }
+)
+CREDIT_KINDS = frozenset({"collect", "ohlcv", "trades", "goplus"})
+CG_CREDIT_KINDS = frozenset({"collect", "ohlcv", "trades"})
 
 _SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS pools (
+CREATE TABLE IF NOT EXISTS security_cache (
   network TEXT NOT NULL,
-  pool_id TEXT NOT NULL,
-  address TEXT NOT NULL,
   token_address TEXT NOT NULL,
-  symbol TEXT,
-  name TEXT,
-  pool_created_at TEXT,
-  first_seen_at TEXT NOT NULL,
-  last_seen_at TEXT NOT NULL,
-  last_price_usd REAL,
-  last_fdv REAL,
-  last_reserve REAL,
-  last_m5 REAL,
-  last_m15 REAL,
-  last_h1 REAL,
-  last_volume_m15 REAL,
-  PRIMARY KEY (network, pool_id)
+  status TEXT NOT NULL CHECK (status IN ('pass', 'reject', 'transient')),
+  mintable INTEGER,
+  freezable INTEGER,
+  expires_at TEXT NOT NULL,
+  checked_at TEXT NOT NULL,
+  PRIMARY KEY (network, token_address)
 );
-CREATE INDEX IF NOT EXISTS idx_pools_last_seen_at ON pools(last_seen_at);
-CREATE UNIQUE INDEX IF NOT EXISTS ux_pools_network_address ON pools(network, address);
+CREATE INDEX IF NOT EXISTS idx_security_cache_expires_at ON security_cache(expires_at);
+
+CREATE TABLE IF NOT EXISTS legs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  network TEXT NOT NULL,
+  token_address TEXT NOT NULL,
+  high_price REAL,
+  ended INTEGER NOT NULL DEFAULT 0,
+  last_seen_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_legs_open
+  ON legs(network, token_address) WHERE ended = 0;
+CREATE INDEX IF NOT EXISTS idx_legs_last_seen_at ON legs(last_seen_at);
 
 CREATE TABLE IF NOT EXISTS signals (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   network TEXT NOT NULL,
   token_address TEXT NOT NULL,
-  pool_id TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  score REAL,
-  created_at TEXT NOT NULL,
+  pool_address TEXT NOT NULL,
+  grade TEXT NOT NULL CHECK (grade IN ('strong', 'weak')),
+  leg_id INTEGER NOT NULL,
   price_at_signal REAL,
-  fdv_at_signal REAL,
-  telegram_message_id TEXT,
+  fdv_usd REAL,
   status TEXT NOT NULL,
-  attempts INTEGER NOT NULL DEFAULT 0,
-  features_json TEXT,
-  config_hash TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  sent_at TEXT,
+  fail_count INTEGER NOT NULL DEFAULT 0,
+  FOREIGN KEY (leg_id) REFERENCES legs(id)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_signals_live
-  ON signals(network, token_address, kind)
+  ON signals(network, token_address, grade, leg_id)
   WHERE status IN ('pending', 'sent');
 CREATE INDEX IF NOT EXISTS idx_signals_status_created ON signals(status, created_at);
 
-CREATE TABLE IF NOT EXISTS watch_log (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  pool_id TEXT NOT NULL,
-  network TEXT NOT NULL,
-  token_address TEXT NOT NULL,
-  started_at TEXT NOT NULL,
-  ended_at TEXT,
-  outcome TEXT,
-  baseline_price REAL,
-  stats_json TEXT,
-  features_json TEXT,
-  config_hash TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS step_counts (
+  date_utc TEXT NOT NULL,
+  step TEXT NOT NULL,
+  n INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (date_utc, step)
 );
-CREATE INDEX IF NOT EXISTS idx_watch_log_started_at ON watch_log(started_at);
-CREATE INDEX IF NOT EXISTS idx_watch_log_network_token ON watch_log(network, token_address);
 
 CREATE TABLE IF NOT EXISTS signal_outcomes (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  source TEXT NOT NULL,
-  source_id INTEGER NOT NULL,
-  network TEXT NOT NULL,
-  token_address TEXT NOT NULL,
-  evaluated_after_h INTEGER NOT NULL DEFAULT 24,
-  evaluated_at TEXT NOT NULL,
-  baseline_price REAL,
-  max_gain_pct REAL,
-  max_drawdown_pct REAL,
-  t_to_peak_min REAL,
-  price_1h REAL,
-  price_24h REAL,
-  is_rug INTEGER,
-  ohlcv_json TEXT
+  signal_id INTEGER PRIMARY KEY,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  expire_price REAL,
+  rel_change_pct REAL,
+  peak_price REAL,
+  drawdown_pct REAL,
+  deep_drawdown INTEGER,
+  evaluated_at TEXT,
+  failed INTEGER NOT NULL DEFAULT 0,
+  FOREIGN KEY (signal_id) REFERENCES signals(id)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS ux_signal_outcomes_eval
-  ON signal_outcomes(source, source_id, evaluated_after_h);
-CREATE INDEX IF NOT EXISTS idx_signal_outcomes_evaluated_at ON signal_outcomes(evaluated_at);
-CREATE INDEX IF NOT EXISTS idx_signal_outcomes_network_token
-  ON signal_outcomes(network, token_address);
-
-CREATE TABLE IF NOT EXISTS security_cache (
-  network TEXT NOT NULL,
-  token_address TEXT NOT NULL,
-  result_json TEXT,
-  passed INTEGER NOT NULL,
-  checked_at TEXT NOT NULL,
-  PRIMARY KEY (network, token_address)
-);
-CREATE INDEX IF NOT EXISTS idx_security_cache_checked_at ON security_cache(checked_at);
-
-CREATE TABLE IF NOT EXISTS token_batch_cache (
-  network TEXT NOT NULL,
-  token_address TEXT NOT NULL,
-  graduated INTEGER NOT NULL,
-  graduation_pct REAL,
-  total_reserve_usd REAL,
-  main_pool_share REAL,
-  checked_at TEXT NOT NULL,
-  PRIMARY KEY (network, token_address)
-);
-CREATE INDEX IF NOT EXISTS idx_token_batch_cache_checked_at ON token_batch_cache(checked_at);
-
-CREATE TABLE IF NOT EXISTS symbol_counter (
-  network TEXT NOT NULL,
-  symbol_norm TEXT NOT NULL,
-  hour_bucket TEXT NOT NULL,
-  token_address TEXT NOT NULL,
-  PRIMARY KEY (network, symbol_norm, hour_bucket, token_address)
-);
-CREATE INDEX IF NOT EXISTS idx_symbol_counter_hour_bucket ON symbol_counter(hour_bucket);
 
 CREATE TABLE IF NOT EXISTS credit_usage (
   date_utc TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK (kind IN ('collect', 'security', 'watch', 'track')),
+  kind TEXT NOT NULL CHECK (kind IN ('collect', 'ohlcv', 'trades', 'goplus')),
   calls INTEGER NOT NULL DEFAULT 0,
-  credits INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (date_utc, kind)
+);
+
+CREATE TABLE IF NOT EXISTS kv (
+  key TEXT PRIMARY KEY,
+  value TEXT
 );
 
 CREATE TABLE IF NOT EXISTS event_log (
@@ -162,53 +134,6 @@ CREATE TABLE IF NOT EXISTS event_log (
   payload TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_event_log_ts ON event_log(ts);
-
-CREATE TABLE IF NOT EXISTS funnel_counts (
-  date_utc TEXT NOT NULL,
-  layer TEXT NOT NULL,
-  rule TEXT NOT NULL,
-  n INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (date_utc, layer, rule)
-);
-
-CREATE TABLE IF NOT EXISTS funnel_seen (
-  date_utc TEXT NOT NULL,
-  layer TEXT NOT NULL,
-  rule TEXT NOT NULL,
-  pool_id TEXT NOT NULL,
-  PRIMARY KEY (date_utc, layer, rule, pool_id)
-);
-CREATE INDEX IF NOT EXISTS idx_funnel_seen_date ON funnel_seen(date_utc);
-
-CREATE TABLE IF NOT EXISTS runtime_kv (
-  key TEXT PRIMARY KEY,
-  value TEXT
-);
-"""
-
-_MIGRATE_2_SQL = """
-DROP TABLE IF EXISTS symbol_counter;
-CREATE TABLE symbol_counter (
-  network TEXT NOT NULL,
-  symbol_norm TEXT NOT NULL,
-  hour_bucket TEXT NOT NULL,
-  token_address TEXT NOT NULL,
-  PRIMARY KEY (network, symbol_norm, hour_bucket, token_address)
-);
-CREATE INDEX IF NOT EXISTS idx_symbol_counter_hour_bucket ON symbol_counter(hour_bucket);
-"""
-
-_MIGRATE_3_SQL = """
-CREATE UNIQUE INDEX IF NOT EXISTS ux_signal_outcomes_eval
-  ON signal_outcomes(source, source_id, evaluated_after_h);
-CREATE TABLE IF NOT EXISTS funnel_seen (
-  date_utc TEXT NOT NULL,
-  layer TEXT NOT NULL,
-  rule TEXT NOT NULL,
-  pool_id TEXT NOT NULL,
-  PRIMARY KEY (date_utc, layer, rule, pool_id)
-);
-CREATE INDEX IF NOT EXISTS idx_funnel_seen_date ON funnel_seen(date_utc);
 """
 
 T = TypeVar("T")
@@ -216,31 +141,18 @@ T = TypeVar("T")
 
 @dataclass(frozen=True)
 class CleanupConfig:
-    pools_retain_h: float
-    watch_log_retain_days: float
-    outcomes_raw_retain_days: float
-    credit_usage_retain_days: float
+    outcomes_retain_days: float
     event_log_retain_days: float
-    security_cache_hours: float
-    ungraduated_recheck_min: float | None
-    copycat_lookback_h: float
+    legs_retain_days: float
     now: datetime
 
 
 def cleanup_config_from_raw(raw: dict[str, Any], now: datetime | None = None) -> CleanupConfig:
     storage = raw["storage"]
-    security = raw["security"]
-    copycat = raw["collection_gates"]["copycat"]
-    ungrad = security["batch"]["cache"]["ungraduated_recheck_min"]
     return CleanupConfig(
-        pools_retain_h=float(storage["pools_retain_h"]),
-        watch_log_retain_days=float(storage["watch_log_retain_days"]),
-        outcomes_raw_retain_days=float(storage["outcomes_raw_retain_days"]),
-        credit_usage_retain_days=float(storage["credit_usage_retain_days"]),
+        outcomes_retain_days=float(storage["outcomes_retain_days"]),
         event_log_retain_days=float(storage["event_log_retain_days"]),
-        security_cache_hours=float(security["cache_hours"]),
-        ungraduated_recheck_min=None if ungrad is None else float(ungrad),
-        copycat_lookback_h=float(copycat["lookback_h"]),
+        legs_retain_days=float(storage["legs_retain_days"]),
         now=now or datetime.now(UTC),
     )
 
@@ -285,7 +197,7 @@ class Store:
             return None
         self.backup_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        dest = self.backup_dir / f"memebot-v{from_version}-{stamp}.db"
+        dest = self.backup_dir / f"momentum-v{from_version}-{stamp}.db"
         copy2(self.db_path, dest)
         for suffix in ("-wal", "-shm"):
             extra = Path(f"{self.db_path}{suffix}")
@@ -304,27 +216,8 @@ class Store:
             if current < SCHEMA_VERSION:
                 conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 self._backup(current)
-                for version in range(current + 1, SCHEMA_VERSION + 1):
-                    if version == 1:
-                        conn.executescript(_SCHEMA_SQL)
-                    elif version == 2:
-                        conn.executescript(_MIGRATE_2_SQL)
-                    elif version == 3:
-                        cols = {
-                            str(r[1])
-                            for r in conn.execute(
-                                "PRAGMA table_info(signal_outcomes)"
-                            ).fetchall()
-                        }
-                        if "evaluated_after_h" not in cols:
-                            conn.execute(
-                                "ALTER TABLE signal_outcomes ADD COLUMN "
-                                "evaluated_after_h INTEGER NOT NULL DEFAULT 24"
-                            )
-                        conn.executescript(_MIGRATE_3_SQL)
-                    else:
-                        raise RuntimeError(f"missing migration for user_version {version}")
-                    conn.execute(f"PRAGMA user_version = {version}")
+                conn.executescript(_SCHEMA_SQL)
+                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
                 conn.commit()
         finally:
             conn.close()
@@ -356,8 +249,7 @@ class Store:
         self._thread.start()
         self._opened = True
         now = datetime.now(UTC).isoformat()
-        instance_id = uuid.uuid4().hex
-        self.kv_set("instance_id", instance_id)
+        self.kv_set("instance_id", uuid.uuid4().hex)
         self.kv_set("heartbeat_at", now)
         self.kv_set("started_at", now)
 
@@ -416,7 +308,7 @@ class Store:
     def kv_set(self, key: str, value: str | None) -> None:
         def _fn(conn: sqlite3.Connection) -> None:
             conn.execute(
-                "INSERT INTO runtime_kv(key, value) VALUES (?, ?) "
+                "INSERT INTO kv(key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (key, value),
             )
@@ -425,62 +317,46 @@ class Store:
 
     def kv_get(self, key: str) -> str | None:
         row = self.read(
-            lambda c: c.execute("SELECT value FROM runtime_kv WHERE key = ?", (key,)).fetchone()
+            lambda c: c.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
         )
-        if row is None:
-            return None
-        return cast(str | None, row[0])
+        return None if row is None else row[0]
 
-    def incr_funnel(self, date_utc: str, layer: str, rule: str, n: int = 1) -> int:
-        if layer not in FUNNEL_LAYERS:
-            raise ValueError(f"invalid funnel layer: {layer}")
+    def incr_step(self, date_utc: str, step: str, n: int = 1) -> int:
+        if step not in STEP_NAMES:
+            raise ValueError(f"unknown step {step}")
 
         def _fn(conn: sqlite3.Connection) -> int:
             conn.execute(
-                "INSERT INTO funnel_counts(date_utc, layer, rule, n) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(date_utc, layer, rule) DO UPDATE SET n = n + excluded.n",
-                (date_utc, layer, rule, n),
+                "INSERT INTO step_counts(date_utc, step, n) VALUES (?, ?, ?) "
+                "ON CONFLICT(date_utc, step) DO UPDATE SET n = n + excluded.n",
+                (date_utc, step, n),
             )
             row = conn.execute(
-                "SELECT n FROM funnel_counts WHERE date_utc = ? AND layer = ? AND rule = ?",
-                (date_utc, layer, rule),
+                "SELECT n FROM step_counts WHERE date_utc = ? AND step = ?",
+                (date_utc, step),
             ).fetchone()
             return int(row[0])
 
         return self.submit(_fn)
 
-    def get_funnel(self, date_utc: str, layer: str, rule: str) -> int:
+    def get_step(self, date_utc: str, step: str) -> int:
         row = self.read(
             lambda c: c.execute(
-                "SELECT n FROM funnel_counts WHERE date_utc = ? AND layer = ? AND rule = ?",
-                (date_utc, layer, rule),
+                "SELECT n FROM step_counts WHERE date_utc = ? AND step = ?",
+                (date_utc, step),
             ).fetchone()
         )
         return 0 if row is None else int(row[0])
 
-    def funnel_seen_once(self, date_utc: str, layer: str, rule: str, pool_id: str) -> bool:
-        """True if this (day, layer, rule, pool) combo was never recorded before."""
-
-        def _fn(conn: sqlite3.Connection) -> bool:
-            cur = conn.execute(
-                "INSERT OR IGNORE INTO funnel_seen(date_utc, layer, rule, pool_id) "
-                "VALUES (?, ?, ?, ?)",
-                (date_utc, layer, rule, pool_id),
-            )
-            return cur.rowcount == 1
-
-        return self.submit(_fn)
-
-    def add_credits(self, date_utc: str, kind: str, calls: int = 1, credits: int = 1) -> int:
+    def add_credits(self, date_utc: str, kind: str, calls: int = 1) -> int:
         if kind not in CREDIT_KINDS:
-            raise ValueError(f"invalid credit kind: {kind}")
+            raise ValueError(f"unknown credit kind {kind}")
 
         def _fn(conn: sqlite3.Connection) -> int:
             conn.execute(
-                "INSERT INTO credit_usage(date_utc, kind, calls, credits) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(date_utc, kind) DO UPDATE SET "
-                "calls = calls + excluded.calls, credits = credits + excluded.credits",
-                (date_utc, kind, calls, credits),
+                "INSERT INTO credit_usage(date_utc, kind, calls) VALUES (?, ?, ?) "
+                "ON CONFLICT(date_utc, kind) DO UPDATE SET calls = calls + excluded.calls",
+                (date_utc, kind, calls),
             )
             row = conn.execute(
                 "SELECT calls FROM credit_usage WHERE date_utc = ? AND kind = ?",
@@ -490,316 +366,206 @@ class Store:
 
         return self.submit(_fn)
 
-    def daily_calls(self, date_utc: str) -> int:
+    def insert_event(self, event_type: str, ts: str, payload: str) -> None:
+        def _fn(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "INSERT INTO event_log(type, ts, payload) VALUES (?, ?, ?)",
+                (event_type, ts, payload),
+            )
+
+        self.submit(_fn)
+
+    def cg_calls_today(self, date_utc: str) -> int:
         row = self.read(
             lambda c: c.execute(
-                "SELECT COALESCE(SUM(calls), 0) AS n FROM credit_usage WHERE date_utc = ?",
+                "SELECT COALESCE(SUM(calls), 0) FROM credit_usage "
+                "WHERE date_utc = ? AND kind IN ('collect', 'ohlcv', 'trades')",
                 (date_utc,),
             ).fetchone()
         )
-        return int(row["n"])
-
-    def month_credits(self, month_prefix: str) -> int:
-        row = self.read(
-            lambda c: c.execute(
-                "SELECT COALESCE(SUM(credits), 0) AS n FROM credit_usage WHERE date_utc LIKE ?",
-                (f"{month_prefix}%",),
-            ).fetchone()
-        )
-        return int(row["n"])
+        return int(row[0])
 
     def put_security(
         self,
         network: str,
         token_address: str,
-        result_json: str,
-        passed: bool,
-        checked_at: str,
+        status: str,
+        expires_at: str,
+        *,
+        mintable: bool | None = None,
+        freezable: bool | None = None,
     ) -> None:
         def _fn(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "INSERT INTO security_cache("
-                "network, token_address, result_json, passed, checked_at) "
-                "VALUES (?, ?, ?, ?, ?) "
+                "network, token_address, status, mintable, freezable, expires_at, checked_at"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(network, token_address) DO UPDATE SET "
-                "result_json = excluded.result_json, passed = excluded.passed, "
+                "status = excluded.status, mintable = excluded.mintable, "
+                "freezable = excluded.freezable, expires_at = excluded.expires_at, "
                 "checked_at = excluded.checked_at",
-                (network, token_address, result_json, int(passed), checked_at),
+                (
+                    network,
+                    token_address,
+                    status,
+                    None if mintable is None else int(mintable),
+                    None if freezable is None else int(freezable),
+                    expires_at,
+                    datetime.now(UTC).isoformat(),
+                ),
             )
 
         self.submit(_fn)
 
     def get_security(self, network: str, token_address: str) -> sqlite3.Row | None:
+        now = datetime.now(UTC).isoformat()
         return cast(
             sqlite3.Row | None,
             self.read(
                 lambda c: c.execute(
-                    "SELECT * FROM security_cache WHERE network = ? AND token_address = ?",
+                    "SELECT * FROM security_cache "
+                    "WHERE network = ? AND token_address = ? AND expires_at > ?",
+                    (network, token_address, now),
+                ).fetchone()
+            ),
+        )
+
+    def open_leg(
+        self,
+        network: str,
+        token_address: str,
+        *,
+        high_price: float | None,
+        last_seen_at: str,
+    ) -> int:
+        if high_price is not None and high_price <= 0:
+            raise ValueError("high_price must be null or > 0")
+
+        def _fn(conn: sqlite3.Connection) -> int:
+            cur = conn.execute(
+                "INSERT INTO legs(network, token_address, high_price, ended, "
+                "last_seen_at, created_at) VALUES (?, ?, ?, 0, ?, ?)",
+                (
+                    network,
+                    token_address,
+                    high_price,
+                    last_seen_at,
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+            rowid = cur.lastrowid
+            if rowid is None:
+                raise RuntimeError("insert produced no rowid")
+            return int(rowid)
+
+        return self.submit(_fn)
+
+    def get_open_leg(self, network: str, token_address: str) -> sqlite3.Row | None:
+        return cast(
+            sqlite3.Row | None,
+            self.read(
+                lambda c: c.execute(
+                    "SELECT * FROM legs WHERE network = ? AND token_address = ? AND ended = 0",
                     (network, token_address),
                 ).fetchone()
             ),
         )
 
-    def put_token_batch(
+    def update_leg(
         self,
-        network: str,
-        token_address: str,
-        graduated: bool | None,
-        checked_at: str,
-        graduation_pct: float | None = None,
-        total_reserve_usd: float | None = None,
-        main_pool_share: float | None = None,
+        leg_id: int,
+        *,
+        high_price: float | None | object = ...,
+        last_seen_at: str | None = None,
+        ended: bool | None = None,
     ) -> None:
-        flag = -1 if graduated is None else int(graduated)
-
         def _fn(conn: sqlite3.Connection) -> None:
+            row = conn.execute("SELECT * FROM legs WHERE id = ?", (leg_id,)).fetchone()
+            if row is None:
+                raise KeyError(leg_id)
+            raw: Any = row["high_price"] if high_price is ... else high_price
+            price = None if raw is None else float(raw)
+            if price is not None and price <= 0:
+                raise ValueError("high_price must be null or > 0")
+            seen = row["last_seen_at"] if last_seen_at is None else last_seen_at
+            flag = row["ended"] if ended is None else int(ended)
             conn.execute(
-                "INSERT INTO token_batch_cache("
-                "network, token_address, graduated, graduation_pct, "
-                "total_reserve_usd, main_pool_share, checked_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(network, token_address) DO UPDATE SET "
-                "graduated = excluded.graduated, graduation_pct = excluded.graduation_pct, "
-                "total_reserve_usd = excluded.total_reserve_usd, "
-                "main_pool_share = excluded.main_pool_share, checked_at = excluded.checked_at",
-                (
-                    network,
-                    token_address,
-                    flag,
-                    graduation_pct,
-                    total_reserve_usd,
-                    main_pool_share,
-                    checked_at,
-                ),
+                "UPDATE legs SET high_price = ?, last_seen_at = ?, ended = ? WHERE id = ?",
+                (price, seen, flag, leg_id),
             )
 
         self.submit(_fn)
 
-    def insert_signal(
-        self,
-        network: str,
-        token_address: str,
-        pool_id: str,
-        kind: str,
-        status: str,
-        created_at: str,
-        config_hash: str,
-        score: float | None = None,
-        features_json: str | None = None,
-    ) -> int:
-        def _fn(conn: sqlite3.Connection) -> int:
-            cur = conn.execute(
-                "INSERT INTO signals("
-                "network, token_address, pool_id, kind, score, created_at, "
-                "status, features_json, config_hash) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    network,
-                    token_address,
-                    pool_id,
-                    kind,
-                    score,
-                    created_at,
-                    status,
-                    features_json,
-                    config_hash,
-                ),
-            )
-            return int(cur.lastrowid or 0)
+    def list_open_legs(self) -> list[sqlite3.Row]:
+        return list(self.read(lambda c: c.execute("SELECT * FROM legs WHERE ended = 0").fetchall()))
 
-        return self.submit(_fn)
-
-    def insert_watch_log(
-        self,
-        pool_id: str,
-        network: str,
-        token_address: str,
-        started_at: str,
-        config_hash: str,
-        ended_at: str | None = None,
-        outcome: str | None = None,
-        baseline_price: float | None = None,
-        stats_json: str | None = None,
-        features_json: str | None = None,
-    ) -> int:
-        def _fn(conn: sqlite3.Connection) -> int:
-            cur = conn.execute(
-                "INSERT INTO watch_log(pool_id, network, token_address, started_at, ended_at, "
-                "outcome, baseline_price, stats_json, features_json, config_hash) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    pool_id,
-                    network,
-                    token_address,
-                    started_at,
-                    ended_at,
-                    outcome,
-                    baseline_price,
-                    stats_json,
-                    features_json,
-                    config_hash,
-                ),
-            )
-            return int(cur.lastrowid or 0)
-
-        return self.submit(_fn)
-
-    def finish_watch(
-        self,
-        watch_id: int,
-        ended_at: str,
-        outcome: str,
-        stats_json: str | None = None,
-    ) -> None:
-        def _fn(conn: sqlite3.Connection) -> None:
-            conn.execute(
-                "UPDATE watch_log SET ended_at = ?, outcome = ?, stats_json = ? WHERE id = ?",
-                (ended_at, outcome, stats_json, watch_id),
-            )
-
-        self.submit(_fn)
-
-    def hanging_watches(self) -> list[sqlite3.Row]:
-        return list(
-            self.read(
-                lambda c: c.execute(
-                    "SELECT * FROM watch_log WHERE ended_at IS NULL ORDER BY id"
-                ).fetchall()
-            )
-        )
-
-    def watch_history(self, network: str, token_address: str) -> list[sqlite3.Row]:
-        return list(
-            self.read(
-                lambda c: c.execute(
-                    "SELECT * FROM watch_log WHERE network = ? AND token_address = ? "
-                    "AND ended_at IS NOT NULL ORDER BY ended_at DESC, id DESC",
-                    (network, token_address),
-                ).fetchall()
-            )
-        )
-
-    def get_token_batch(self, network: str, token_address: str) -> sqlite3.Row | None:
-        return cast(
-            sqlite3.Row | None,
-            self.read(
-                lambda c: c.execute(
-                    "SELECT * FROM token_batch_cache WHERE network = ? AND token_address = ?",
-                    (network, token_address),
-                ).fetchone()
-            ),
-        )
-
-    def symbol_count(self, network: str, symbol_norm: str, min_bucket: str) -> int:
-        row = self.read(
-            lambda c: c.execute(
-                "SELECT COUNT(*) AS n FROM symbol_counter "
-                "WHERE network = ? AND symbol_norm = ? AND hour_bucket >= ?",
-                (network, symbol_norm, min_bucket),
-            ).fetchone()
-        )
-        return int(row["n"])
-
-    def kind_calls(self, date_utc: str, kind: str) -> int:
-        row = self.read(
-            lambda c: c.execute(
-                "SELECT COALESCE(SUM(calls), 0) AS n FROM credit_usage "
-                "WHERE date_utc = ? AND kind = ?",
-                (date_utc, kind),
-            ).fetchone()
-        )
-        return int(row["n"])
-
-    def insert_signal_with_event(
+    def insert_pending_signal(
         self,
         *,
         network: str,
         token_address: str,
-        pool_id: str,
-        kind: str,
-        status: str,
-        created_at: str,
-        config_hash: str,
-        event_type: str,
-        payload: str,
-        score: float | None = None,
-        features_json: str | None = None,
-        price_at_signal: float | None = None,
-        fdv_at_signal: float | None = None,
+        pool_address: str,
+        grade: str,
+        leg_id: int,
+        price_at_signal: float,
+        fdv_usd: float | None,
     ) -> int:
         def _fn(conn: sqlite3.Connection) -> int:
             cur = conn.execute(
-                "INSERT INTO signals("
-                "network, token_address, pool_id, kind, score, created_at, "
-                "price_at_signal, fdv_at_signal, status, features_json, config_hash) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO signals(network, token_address, pool_address, grade, leg_id, "
+                "price_at_signal, fdv_usd, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
                 (
                     network,
                     token_address,
-                    pool_id,
-                    kind,
-                    score,
-                    created_at,
+                    pool_address,
+                    grade,
+                    leg_id,
                     price_at_signal,
-                    fdv_at_signal,
-                    status,
-                    features_json,
-                    config_hash,
+                    fdv_usd,
+                    datetime.now(UTC).isoformat(),
                 ),
             )
-            sid = int(cur.lastrowid or 0)
-            conn.execute(
-                "INSERT INTO event_log(type, ts, payload) VALUES (?, ?, ?)",
-                (event_type, created_at, payload),
-            )
-            return sid
+            rowid = cur.lastrowid
+            if rowid is None:
+                raise RuntimeError("insert produced no rowid")
+            return int(rowid)
 
         return self.submit(_fn)
 
-    def update_signal_status(
-        self,
-        signal_id: int,
-        status: str,
-        telegram_message_id: str | None = None,
-        attempts: int | None = None,
-    ) -> None:
+    def mark_signal_sent(self, signal_id: int, event_type: str, payload: dict[str, Any]) -> None:
         def _fn(conn: sqlite3.Connection) -> None:
-            if attempts is None:
-                conn.execute(
-                    "UPDATE signals SET status = ?, "
-                    "telegram_message_id = COALESCE(?, telegram_message_id) "
-                    "WHERE id = ?",
-                    (status, telegram_message_id, signal_id),
-                )
-            else:
-                conn.execute(
-                    "UPDATE signals SET status = ?, "
-                    "telegram_message_id = COALESCE(?, telegram_message_id), "
-                    "attempts = ? WHERE id = ?",
-                    (status, telegram_message_id, attempts, signal_id),
-                )
+            now = datetime.now(UTC).isoformat()
+            conn.execute(
+                "UPDATE signals SET status = 'sent', sent_at = ? WHERE id = ?",
+                (now, signal_id),
+            )
+            conn.execute(
+                "INSERT INTO event_log(type, ts, payload) VALUES (?, ?, ?)",
+                (event_type, now, json.dumps(payload, ensure_ascii=True)),
+            )
 
         self.submit(_fn)
 
-    def count_send_failures(self, network: str, token_address: str, kind: str) -> int:
+    def has_live_signal(self, network: str, token_address: str, grade: str, leg_id: int) -> bool:
         row = self.read(
             lambda c: c.execute(
-                "SELECT COUNT(*) AS n FROM signals WHERE network = ? AND token_address = ? "
-                "AND kind = ? AND status IN ('failed_perm', 'failed_retry')",
-                (network, token_address, kind),
-            ).fetchone()
-        )
-        return int(row["n"])
-
-    def has_live_signal(self, network: str, token_address: str, kind: str) -> bool:
-        row = self.read(
-            lambda c: c.execute(
-                "SELECT 1 FROM signals WHERE network = ? AND token_address = ? AND kind = ? "
-                "AND status IN ('pending', 'sent') LIMIT 1",
-                (network, token_address, kind),
+                "SELECT 1 FROM signals WHERE network = ? AND token_address = ? "
+                "AND grade = ? AND leg_id = ? AND status IN ('pending', 'sent')",
+                (network, token_address, grade, leg_id),
             ).fetchone()
         )
         return row is not None
+
+    def pending_or_sent_grades(self, network: str, token_address: str, leg_id: int) -> set[str]:
+        rows = self.read(
+            lambda c: c.execute(
+                "SELECT grade FROM signals WHERE network = ? AND token_address = ? "
+                "AND leg_id = ? AND status IN ('pending', 'sent')",
+                (network, token_address, leg_id),
+            ).fetchall()
+        )
+        return {str(r["grade"]) for r in rows}
 
     def get_signal(self, signal_id: int) -> sqlite3.Row | None:
         return cast(
@@ -809,18 +575,158 @@ class Store:
             ),
         )
 
-    def list_signals(self, status: str | None = None) -> list[sqlite3.Row]:
+    def list_signals(self, *, status: str | None = None, limit: int = 10) -> list[sqlite3.Row]:
         if status is None:
             return list(
-                self.read(lambda c: c.execute("SELECT * FROM signals ORDER BY id").fetchall())
+                self.read(
+                    lambda c: c.execute(
+                        "SELECT * FROM signals ORDER BY id DESC LIMIT ?", (limit,)
+                    ).fetchall()
+                )
             )
         return list(
             self.read(
                 lambda c: c.execute(
-                    "SELECT * FROM signals WHERE status = ? ORDER BY id", (status,)
+                    "SELECT * FROM signals WHERE status = ? ORDER BY id DESC LIMIT ?",
+                    (status, limit),
                 ).fetchall()
             )
         )
+
+    def list_pending(self) -> list[sqlite3.Row]:
+        return list(
+            self.read(
+                lambda c: c.execute(
+                    "SELECT * FROM signals WHERE status = 'pending' ORDER BY id"
+                ).fetchall()
+            )
+        )
+
+    def update_signal_status(self, signal_id: int, status: str, *, add_fails: int = 0) -> None:
+        def _fn(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "UPDATE signals SET status = ?, fail_count = fail_count + ? WHERE id = ?",
+                (status, add_fails, signal_id),
+            )
+
+        self.submit(_fn)
+
+    def count_send_failures(
+        self, network: str, token_address: str, grade: str, leg_id: int
+    ) -> int:
+        row = self.read(
+            lambda c: c.execute(
+                "SELECT COALESCE(SUM(fail_count), 0) AS n FROM signals "
+                "WHERE network = ? AND token_address = ? AND grade = ? AND leg_id = ? "
+                "AND status IN ('failed_perm', 'failed_retry')",
+                (network, token_address, grade, leg_id),
+            ).fetchone()
+        )
+        return 0 if row is None else int(row[0])
+
+    def put_signal_card(self, signal_id: int, card: dict[str, Any]) -> None:
+        self.insert_event(
+            "signal.card",
+            datetime.now(UTC).isoformat(),
+            json.dumps({"signal_id": signal_id, "card": card}, ensure_ascii=True),
+        )
+
+    def get_signal_card(self, signal_id: int) -> dict[str, Any] | None:
+        rows = self.read(
+            lambda c: c.execute(
+                "SELECT payload FROM event_log WHERE type = 'signal.card' ORDER BY id DESC"
+            ).fetchall()
+        )
+        for row in rows:
+            try:
+                data = json.loads(str(row[0]))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, dict) and data.get("signal_id") == signal_id:
+                card = data.get("card")
+                return card if isinstance(card, dict) else None
+        return None
+
+    def list_due_sent(self, cutoff_iso: str) -> list[sqlite3.Row]:
+        return list(
+            self.read(
+                lambda c: c.execute(
+                    "SELECT s.* FROM signals s "
+                    "LEFT JOIN signal_outcomes o ON o.signal_id = s.id "
+                    "WHERE s.status = 'sent' AND s.sent_at IS NOT NULL AND s.sent_at <= ? "
+                    "AND (o.signal_id IS NULL OR o.failed = 1)",
+                    (cutoff_iso,),
+                ).fetchall()
+            )
+        )
+
+    def get_outcome(self, signal_id: int) -> sqlite3.Row | None:
+        return cast(
+            sqlite3.Row | None,
+            self.read(
+                lambda c: c.execute(
+                    "SELECT * FROM signal_outcomes WHERE signal_id = ?", (signal_id,)
+                ).fetchone()
+            ),
+        )
+
+    def upsert_outcome(
+        self,
+        signal_id: int,
+        *,
+        failed: bool,
+        expire_price: float | None = None,
+        rel_change_pct: float | None = None,
+        peak_price: float | None = None,
+        drawdown_pct: float | None = None,
+        deep_drawdown: bool | None = None,
+    ) -> int:
+        def _fn(conn: sqlite3.Connection) -> int:
+            now = datetime.now(UTC).isoformat()
+            existing = conn.execute(
+                "SELECT attempts FROM signal_outcomes WHERE signal_id = ?",
+                (signal_id,),
+            ).fetchone()
+            attempts = 1 if existing is None else int(existing[0]) + 1
+            conn.execute(
+                "INSERT INTO signal_outcomes("
+                "signal_id, attempts, expire_price, rel_change_pct, peak_price, "
+                "drawdown_pct, deep_drawdown, evaluated_at, failed"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(signal_id) DO UPDATE SET "
+                "attempts = excluded.attempts, "
+                "expire_price = excluded.expire_price, "
+                "rel_change_pct = excluded.rel_change_pct, "
+                "peak_price = excluded.peak_price, "
+                "drawdown_pct = excluded.drawdown_pct, "
+                "deep_drawdown = excluded.deep_drawdown, "
+                "evaluated_at = excluded.evaluated_at, "
+                "failed = excluded.failed",
+                (
+                    signal_id,
+                    attempts,
+                    expire_price,
+                    rel_change_pct,
+                    peak_price,
+                    drawdown_pct,
+                    None if deep_drawdown is None else int(deep_drawdown),
+                    now,
+                    int(failed),
+                ),
+            )
+            return attempts
+
+        return self.submit(_fn)
+
+    def month_cg_calls(self, month: str) -> int:
+        row = self.read(
+            lambda c: c.execute(
+                "SELECT COALESCE(SUM(calls), 0) FROM credit_usage "
+                "WHERE date_utc LIKE ? AND kind IN ('collect', 'ohlcv', 'trades')",
+                (f"{month}%",),
+            ).fetchone()
+        )
+        return int(row[0])
 
     def abandon_expired_pending(self, cutoff_iso: str) -> list[int]:
         def _fn(conn: sqlite3.Connection) -> list[int]:
@@ -830,212 +736,59 @@ class Store:
             ).fetchall()
             ids = [int(r[0]) for r in rows]
             if ids:
-                conn.execute(
-                    "UPDATE signals SET status = 'abandoned' "
-                    "WHERE status = 'pending' AND created_at < ?",
-                    (cutoff_iso,),
+                conn.executemany(
+                    "UPDATE signals SET status = 'abandoned' WHERE id = ?",
+                    [(i,) for i in ids],
                 )
             return ids
 
         return self.submit(_fn)
 
-    def funnel_day(self, date_utc: str) -> list[sqlite3.Row]:
-        return list(
-            self.read(
-                lambda c: c.execute(
-                    "SELECT layer, rule, n FROM funnel_counts "
-                    "WHERE date_utc = ? ORDER BY layer, rule",
-                    (date_utc,),
+    def cleanup(self, cfg: CleanupConfig) -> None:
+        now = cfg.now
+
+        def iso(days: float) -> str:
+            return (now - timedelta(days=days)).isoformat()
+
+        def _fn(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "DELETE FROM signal_outcomes WHERE evaluated_at IS NOT NULL AND evaluated_at < ?",
+                (iso(cfg.outcomes_retain_days),),
+            )
+            conn.execute("DELETE FROM event_log WHERE ts < ?", (iso(cfg.event_log_retain_days),))
+            stale = conn.execute(
+                "SELECT id FROM legs WHERE ended = 1 AND last_seen_at < ?",
+                (iso(cfg.legs_retain_days),),
+            ).fetchall()
+            leg_ids = [int(r[0]) for r in stale]
+            if leg_ids:
+                marks = ",".join("?" * len(leg_ids))
+                sigs = conn.execute(
+                    f"SELECT id FROM signals WHERE leg_id IN ({marks})",
+                    leg_ids,
                 ).fetchall()
-            )
-        )
-
-    def sent_count_on(self, date_utc: str) -> int:
-        row = self.read(
-            lambda c: c.execute(
-                "SELECT COUNT(*) AS n FROM signals WHERE status = 'sent' AND created_at LIKE ?",
-                (f"{date_utc}%",),
-            ).fetchone()
-        )
-        return int(row["n"])
-
-    def update_outcome_metrics(
-        self,
-        outcome_id: int,
-        *,
-        baseline_price: float | None,
-        max_gain_pct: float | None,
-        max_drawdown_pct: float | None,
-        t_to_peak_min: float | None,
-        price_1h: float | None,
-        price_24h: float | None,
-        is_rug: bool,
-        ohlcv_json: str | None,
-    ) -> None:
-        def _fn(conn: sqlite3.Connection) -> None:
+                sig_ids = [int(r[0]) for r in sigs]
+                if sig_ids:
+                    smarks = ",".join("?" * len(sig_ids))
+                    conn.execute(
+                        f"DELETE FROM signal_outcomes WHERE signal_id IN ({smarks})",
+                        sig_ids,
+                    )
+                    conn.execute(f"DELETE FROM signals WHERE id IN ({smarks})", sig_ids)
+                conn.execute(f"DELETE FROM legs WHERE id IN ({marks})", leg_ids)
             conn.execute(
-                "UPDATE signal_outcomes SET baseline_price=?, max_gain_pct=?, max_drawdown_pct=?, "
-                "t_to_peak_min=?, price_1h=?, price_24h=?, is_rug=?, ohlcv_json=? WHERE id=?",
-                (
-                    baseline_price,
-                    max_gain_pct,
-                    max_drawdown_pct,
-                    t_to_peak_min,
-                    price_1h,
-                    price_24h,
-                    int(is_rug),
-                    ohlcv_json,
-                    outcome_id,
-                ),
+                "DELETE FROM security_cache WHERE expires_at < ?",
+                (now.isoformat(),),
+            )
+            conn.execute(
+                "DELETE FROM step_counts WHERE date_utc < ?",
+                ((now - timedelta(days=cfg.outcomes_retain_days)).strftime("%Y-%m-%d"),),
             )
 
         self.submit(_fn)
-
-    def insert_event(self, event_type: str, ts: str, payload: str | None = None) -> int:
-        def _fn(conn: sqlite3.Connection) -> int:
-            cur = conn.execute(
-                "INSERT INTO event_log(type, ts, payload) VALUES (?, ?, ?)",
-                (event_type, ts, payload),
-            )
-            return int(cur.lastrowid or 0)
-
-        return self.submit(_fn)
-
-    def insert_outcome(
-        self,
-        source: str,
-        source_id: int,
-        network: str,
-        token_address: str,
-        evaluated_after_h: int,
-        evaluated_at: str,
-        ohlcv_json: str | None = None,
-    ) -> int:
-        def _fn(conn: sqlite3.Connection) -> int:
-            cur = conn.execute(
-                "INSERT INTO signal_outcomes(source, source_id, network, token_address, "
-                "evaluated_after_h, evaluated_at, ohlcv_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    source, source_id, network, token_address, evaluated_after_h,
-                    evaluated_at, ohlcv_json,
-                ),
-            )
-            return int(cur.lastrowid or 0)
-
-        return self.submit(_fn)
-
-    def outcome_exists(self, source: str, source_id: int, evaluated_after_h: int) -> bool:
-        row = self.read(
-            lambda c: c.execute(
-                "SELECT 1 FROM signal_outcomes "
-                "WHERE source = ? AND source_id = ? AND evaluated_after_h = ? LIMIT 1",
-                (source, source_id, evaluated_after_h),
-            ).fetchone()
-        )
-        return row is not None
-
-    def upsert_pool(
-        self,
-        network: str,
-        pool_id: str,
-        address: str,
-        token_address: str,
-        first_seen_at: str,
-        last_seen_at: str,
-        symbol: str | None = None,
-        pool_created_at: str | None = None,
-    ) -> None:
-        def _fn(conn: sqlite3.Connection) -> None:
-            conn.execute(
-                "INSERT INTO pools(network, pool_id, address, token_address, symbol, "
-                "pool_created_at, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(network, pool_id) DO UPDATE SET "
-                "last_seen_at = excluded.last_seen_at, symbol = excluded.symbol, "
-                "pool_created_at = COALESCE(excluded.pool_created_at, pools.pool_created_at)",
-                (
-                    network,
-                    pool_id,
-                    address,
-                    token_address,
-                    symbol,
-                    pool_created_at,
-                    first_seen_at,
-                    last_seen_at,
-                ),
-            )
-
-        self.submit(_fn)
-
-    def incr_symbol(
-        self, network: str, symbol_norm: str, hour_bucket: str, token_address: str
-    ) -> int:
-        def _fn(conn: sqlite3.Connection) -> int:
-            conn.execute(
-                "INSERT OR IGNORE INTO symbol_counter("
-                "network, symbol_norm, hour_bucket, token_address) VALUES (?, ?, ?, ?)",
-                (network, symbol_norm, hour_bucket, token_address),
-            )
-            row = conn.execute(
-                "SELECT COUNT(*) AS n FROM symbol_counter "
-                "WHERE network = ? AND symbol_norm = ? AND hour_bucket = ?",
-                (network, symbol_norm, hour_bucket),
-            ).fetchone()
-            return int(row[0])
-
-        return self.submit(_fn)
 
     def wal_checkpoint_truncate(self) -> None:
         def _fn(conn: sqlite3.Connection) -> None:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
         self.submit(_fn)
-
-    def cleanup(self, cfg: CleanupConfig) -> None:
-        now = cfg.now
-        if now.tzinfo is None:
-            now = now.replace(tzinfo=UTC)
-
-        def iso(dt: datetime) -> str:
-            return dt.astimezone(UTC).isoformat()
-
-        pools_cut = iso(now - timedelta(hours=cfg.pools_retain_h))
-        watch_cut = iso(now - timedelta(days=cfg.watch_log_retain_days))
-        outcomes_cut = iso(now - timedelta(days=cfg.outcomes_raw_retain_days))
-        credit_cut = (now - timedelta(days=cfg.credit_usage_retain_days)).date().isoformat()
-        event_cut = iso(now - timedelta(days=cfg.event_log_retain_days))
-        security_cut = iso(now - timedelta(hours=cfg.security_cache_hours))
-        lookback_cut = (now - timedelta(hours=cfg.copycat_lookback_h)).strftime("%Y-%m-%dT%H")
-        ungrad_cut = (
-            None
-            if cfg.ungraduated_recheck_min is None
-            else iso(now - timedelta(minutes=cfg.ungraduated_recheck_min))
-        )
-
-        def _fn(conn: sqlite3.Connection) -> None:
-            conn.execute("DELETE FROM pools WHERE last_seen_at < ?", (pools_cut,))
-            conn.execute(
-                "DELETE FROM watch_log WHERE COALESCE(ended_at, started_at) < ?",
-                (watch_cut,),
-            )
-            conn.execute(
-                "UPDATE signal_outcomes SET ohlcv_json = NULL "
-                "WHERE evaluated_at < ? AND ohlcv_json IS NOT NULL",
-                (outcomes_cut,),
-            )
-            conn.execute("DELETE FROM credit_usage WHERE date_utc < ?", (credit_cut,))
-            conn.execute("DELETE FROM funnel_counts WHERE date_utc < ?", (credit_cut,))
-            conn.execute("DELETE FROM funnel_seen WHERE date_utc < ?", (credit_cut,))
-            conn.execute("DELETE FROM event_log WHERE ts < ?", (event_cut,))
-            conn.execute("DELETE FROM security_cache WHERE checked_at < ?", (security_cut,))
-            if ungrad_cut is not None:
-                conn.execute(
-                    "DELETE FROM token_batch_cache WHERE graduated != 1 AND checked_at < ?",
-                    (ungrad_cut,),
-                )
-            conn.execute("DELETE FROM symbol_counter WHERE hour_bucket < ?", (lookback_cut,))
-
-        self.submit(_fn)
-
-    def maintenance_once(self, cfg: CleanupConfig) -> None:
-        self.cleanup(cfg)
-        self.wal_checkpoint_truncate()
