@@ -54,7 +54,7 @@ streams:
       sort: h1_price_change_percentage_desc
       price_change_percentage_min: 10
       price_change_percentage_duration: 1h
-    max_fdv_usd: null                 # null = 继承 collection_gates
+    max_fdv_usd: 2000000              # 与 trending 对齐；涨得高的池 FDV 高
     max_age_h: null                   # null = 继承 business_gates
   new_pools:                          # 回退方案，source=new_pools 时生效
     enabled: false
@@ -102,7 +102,7 @@ collection_gates:
   copycat:
     enabled: true
     lookback_h: 24
-    max_same_symbol: 3
+    max_same_symbol: 5                # 同名潮是 meme 叙事常态
   max_sus_reports: 0
 
 # ── 第1层：业务门槛（免费字段）──────────────────
