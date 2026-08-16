@@ -222,6 +222,7 @@ telegram:
   alert_silence_sec: 600
   consecutive_failure_alert: 5
   symbol_max_len: 24
+  admin_poll_interval_sec: 20         # getUpdates 短轮询间隔，见开发文档 §3.8.4
 
 # ── 存储 ────────────────────────────────────────
 storage:

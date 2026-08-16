@@ -250,6 +250,7 @@ class WatchSession:
     features: dict[str, Any]
     dwell_protected_until: datetime
     peak_price: float
+    last_price: float | None = None
 
 
 @dataclass
@@ -313,6 +314,7 @@ class Watcher:
             features=features,
             dwell_protected_until=now + timedelta(seconds=min_dwell),
             peak_price=baseline,
+            last_price=baseline,
         )
         self.sessions[k] = sess
         funnel_add("watch", "_input")

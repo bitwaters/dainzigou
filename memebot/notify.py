@@ -354,6 +354,27 @@ class Notifier:
         status = "failed_retry" if last_status == 0 or last_status >= 500 else "failed_perm"
         self.store.update_signal_status(signal_id, status, attempts=attempts)
 
+    async def send_admin(self, text: str) -> None:
+        await self._send(str(self.raw["telegram"]["admin_id"]), text, None)
+
+    async def get_updates(self, offset: int | None = None, timeout: int = 0) -> list[Any]:
+        params: dict[str, Any] = {"timeout": timeout}
+        if offset is not None:
+            params["offset"] = offset
+        try:
+            resp = await self._client.get(f"/bot{self.token}/getUpdates", params=params)
+        except httpx.HTTPError as exc:
+            log.warning("getUpdates failed: %s", exc)
+            return []
+        if resp.status_code != 200:
+            log.warning("getUpdates HTTP %s", resp.status_code)
+            return []
+        body = resp.json()
+        if not isinstance(body, dict):
+            return []
+        result = body.get("result")
+        return result if isinstance(result, list) else []
+
     async def _send(self, chat_id: str, text: str, markup: dict[str, Any] | None) -> None:
         try:
             await self._client.post(

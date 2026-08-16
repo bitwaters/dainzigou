@@ -209,6 +209,7 @@ _REQUIRED_PATHS = (
     "telegram.alert_silence_sec",
     "telegram.consecutive_failure_alert",
     "telegram.symbol_max_len",
+    "telegram.admin_poll_interval_sec",
     "storage.pools_retain_h",
     "storage.watch_log_retain_days",
     "storage.outcomes_raw_retain_days",

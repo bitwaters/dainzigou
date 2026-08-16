@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from memebot.admin import AdminHandler
 from memebot.budget import Budget
 from memebot.cg_client import CgClient, CgSettings
 from memebot.config import AppConfig
@@ -45,6 +46,7 @@ class Runtime:
         )
         self.client = CgClient(cfg.secrets.coingecko_api_key, CgSettings.from_app(cfg), self.budget)
         self.watcher = Watcher(store, cfg.raw, cfg.config_hash)
+        self.admin = AdminHandler(store, cfg.raw, self.notifier, self.watcher, self._push_report)
         self.started_at = datetime.now(UTC).isoformat()
         self._stop = asyncio.Event()
         self._cycle_lock = asyncio.Lock()
@@ -111,6 +113,7 @@ class Runtime:
             asyncio.create_task(self._loop_maint(), name="maint"),
             asyncio.create_task(self._loop_report(), name="report"),
             asyncio.create_task(self._loop_heartbeat(), name="hb"),
+            asyncio.create_task(self._loop_admin(), name="admin"),
         ]
         source = str(self.cfg.get("streams.source"))
         if source == "megafilter" and self.cfg.get("streams.megafilter.enabled"):
@@ -248,6 +251,8 @@ class Runtime:
                 return
             if result.peak_price is not None:
                 sess.peak_price = result.peak_price
+            if result.last_price is not None:
+                sess.last_price = result.last_price
             if result.confirmed:
                 self.watcher.finish(sess, now, "confirmed", result.stats, funnel.add)
                 await self._emit_confirmed(sess, result.stats, now, result.last_price)
@@ -519,6 +524,15 @@ class Runtime:
             timeout_max_summary=stats["timeout_max_summary"],
         )
         await self.notifier.alert(text, f"report.{day}", now)
+
+    async def _loop_admin(self) -> None:
+        interval = float(self.cfg.get("telegram.admin_poll_interval_sec"))
+        while not self._stop.is_set():
+            try:
+                await self.admin.poll_once()
+            except Exception:
+                log.exception("admin poll failed; skip round")
+            await self._sleep(interval)
 
     async def _loop_heartbeat(self) -> None:
         interval = float(self.cfg.get("runtime.health.heartbeat_interval_sec"))
