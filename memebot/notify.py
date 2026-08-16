@@ -39,6 +39,7 @@ def payload_from_signal_row(row: Any) -> dict[str, Any]:
             row["fdv_at_signal"] if row["fdv_at_signal"] is not None else feats.get("fdv_usd")
         ),
         "market_cap_usd": feats.get("market_cap_usd"),
+        "market_cap_est_usd": feats.get("market_cap_est_usd"),
         "reserve_usd": feats.get("reserve_usd"),
         "age_min": feats.get("age_min"),
         "holders": feats.get("holders"),
@@ -201,10 +202,13 @@ def render_signal(payload: dict[str, Any], raw: dict[str, Any]) -> tuple[str, di
     lines.append(f"<code>{ca}</code>")
     money: list[str] = []
     mc = fmt_usd(payload.get("market_cap_usd"))
+    mc_est = fmt_usd(payload.get("market_cap_est_usd"))
     fdv = fmt_usd(payload.get("fdv_usd"))
     liq = fmt_usd(payload.get("reserve_usd"))
     if mc:
         money.append(f"市值 {mc}")
+    elif mc_est:
+        money.append(f"市值≈ {mc_est}")
     else:
         money.append("市值 —")
     if fdv:

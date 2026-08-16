@@ -278,6 +278,9 @@ class Runtime:
         mc_now = scale_from_baseline(
             sess.features.get("market_cap_usd"), sess.baseline, last_price
         )
+        mc_est_now = scale_from_baseline(
+            sess.features.get("market_cap_est_usd"), sess.baseline, last_price
+        )
         age_admit = sess.features.get("age_min")
         age_now = None
         if age_admit is not None:
@@ -293,6 +296,7 @@ class Runtime:
             "created_at": now.isoformat(),
             "fdv_usd": fdv_now,
             "market_cap_usd": mc_now,
+            "market_cap_est_usd": mc_est_now,
             "reserve_usd": sess.features.get("reserve_usd"),
             "age_min": age_now,
             "buyers": stats.buyers,
@@ -320,6 +324,7 @@ class Runtime:
                 "price_change_pct": stats.price_change_pct,
                 "fdv_usd": fdv_now,
                 "market_cap_usd": mc_now,
+                "market_cap_est_usd": mc_est_now,
             }
         )
         sid = self.notifier.try_insert_pending(

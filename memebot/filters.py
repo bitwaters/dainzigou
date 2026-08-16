@@ -266,10 +266,14 @@ async def run_l2a(
                 completed = launch.get("completed")
                 total = _as_float(attrs.get("total_reserve_in_usd"))
                 mc = _as_float(attrs.get("market_cap_usd"))
-                if card_fields is not None and mc is not None:
-                    card_fields.setdefault((pool.network, pool.token_address), {})[
-                        "market_cap_usd"
-                    ] = mc
+                if card_fields is not None:
+                    entry = card_fields.setdefault((pool.network, pool.token_address), {})
+                    if mc is not None:
+                        entry["market_cap_usd"] = mc
+                    elif total is not None and pool.fdv_usd is not None:
+                        est = pool.fdv_usd - total / 2.0
+                        if est > 0:
+                            entry["market_cap_est_usd"] = est
                 share = None
                 if total and total > 0 and pool.reserve_usd is not None:
                     share = pool.reserve_usd / total
