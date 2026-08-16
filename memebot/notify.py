@@ -205,6 +205,8 @@ def render_signal(payload: dict[str, Any], raw: dict[str, Any]) -> tuple[str, di
     liq = fmt_usd(payload.get("reserve_usd"))
     if mc:
         money.append(f"市值 {mc}")
+    else:
+        money.append("市值 —")
     if fdv:
         money.append(f"FDV {fdv}")
     if liq:
