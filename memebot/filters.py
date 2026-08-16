@@ -55,6 +55,18 @@ class Funnel:
         if n:
             self.store.incr_funnel(self.day, layer, rule, n)
 
+    def add_src(self, layer: str, rule: str, source: str, n: int = 1) -> None:
+        self.add(layer, rule, n)
+        if source:
+            self.add(layer, f"{source}:{rule}", n)
+
+    def add_once(self, layer: str, rule: str, pool_id: str, source: str) -> None:
+        if source:
+            self.add(layer, f"{source}:{rule}")
+        seen = self.store.incr_funnel(self.day, layer, f"_seen:{rule}:{pool_id}")
+        if seen == 1:
+            self.add(layer, rule)
+
 
 def record_symbols(store: Store, pools: list[PoolSnapshot], now: datetime) -> None:
     bucket = now.astimezone(UTC).strftime("%Y-%m-%dT%H")
@@ -152,14 +164,16 @@ def apply_layer(
     results: list[FilterResult],
     funnel: Funnel,
 ) -> list[PoolSnapshot]:
-    funnel.add(layer, "_input", len(results))
     passed: list[PoolSnapshot] = []
     for item in results:
+        src = item.pool.source
+        pid = item.pool.pool_id
+        funnel.add_once(layer, "_input", pid, src)
         if item.passed:
             passed.append(item.pool)
+            funnel.add_once(layer, "_passed", pid, src)
         elif item.rejected_rule:
-            funnel.add(layer, item.rejected_rule)
-    funnel.add(layer, "_passed", len(passed))
+            funnel.add_once(layer, item.rejected_rule, pid, src)
     return passed
 
 
@@ -185,6 +199,10 @@ def _cache_fresh(checked_at: str, minutes: float | None, now: datetime) -> bool:
     return now.astimezone(UTC) - ts.astimezone(UTC) < timedelta(minutes=minutes)
 
 
+def _l2_once(funnel: Funnel, layer: str, rule: str, pool: PoolSnapshot) -> None:
+    funnel.add_once(layer, rule, pool.pool_id, pool.source)
+
+
 async def run_l2a(
     pools: list[PoolSnapshot],
     raw: dict[str, Any],
@@ -193,7 +211,6 @@ async def run_l2a(
     now: datetime,
     funnel: Funnel,
 ) -> list[PoolSnapshot]:
-    funnel.add("l2a", "_input", len(pools))
     sec = raw["security"]
     batch_cfg = sec["batch"]
     cache_cfg = batch_cfg["cache"]
@@ -203,6 +220,7 @@ async def run_l2a(
     passed: list[PoolSnapshot] = []
     need: dict[str, list[PoolSnapshot]] = {}
     for pool in pools:
+        _l2_once(funnel, "l2a", "_input", pool)
         row = store.get_token_batch(pool.network, pool.token_address)
         use_cache = False
         if row is not None:
@@ -224,9 +242,12 @@ async def run_l2a(
             ):
                 use_cache = True
         if use_cache and row is not None:
-            verdict = _l2a_from_row(pool, row, min_share, reject_ungrad, funnel)
-            if verdict:
+            reason = _l2a_from_row(row, min_share, reject_ungrad)
+            if reason:
+                _l2_once(funnel, "l2a", reason, pool)
+            else:
                 passed.append(pool)
+                _l2_once(funnel, "l2a", "_passed", pool)
         else:
             need.setdefault(pool.network, []).append(pool)
     for network, group in need.items():
@@ -238,7 +259,7 @@ async def run_l2a(
             for pool in chunk:
                 token = by_addr.get(pool.token_address.lower())
                 if token is None:
-                    funnel.add("l2a", "tokens_multi_missing")
+                    _l2_once(funnel, "l2a", "tokens_multi_missing", pool)
                     continue
                 attrs = as_dict(token.get("attributes"))
                 launch = as_dict(attrs.get("launchpad_details"))
@@ -264,31 +285,23 @@ async def run_l2a(
                     main_pool_share=share,
                 )
                 if reject_ungrad and completed is False:
-                    funnel.add("l2a", "ungraduated")
+                    _l2_once(funnel, "l2a", "ungraduated", pool)
                     continue
                 if share is None or share < min_share:
-                    funnel.add("l2a", "min_main_pool_share")
+                    _l2_once(funnel, "l2a", "min_main_pool_share", pool)
                     continue
                 passed.append(pool)
-    funnel.add("l2a", "_passed", len(passed))
+                _l2_once(funnel, "l2a", "_passed", pool)
     return passed
 
 
-def _l2a_from_row(
-    pool: PoolSnapshot,
-    row: Any,
-    min_share: float,
-    reject_ungrad: bool,
-    funnel: Funnel,
-) -> bool:
+def _l2a_from_row(row: Any, min_share: float, reject_ungrad: bool) -> str | None:
     if reject_ungrad and int(row["graduated"]) == 0:
-        funnel.add("l2a", "ungraduated")
-        return False
+        return "ungraduated"
     share = row["main_pool_share"]
     if share is None or float(share) < min_share:
-        funnel.add("l2a", "min_main_pool_share")
-        return False
-    return True
+        return "min_main_pool_share"
+    return None
 
 
 def _index_tokens(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -356,31 +369,32 @@ async def run_l2b(
     funnel: Funnel,
     card_fields: dict[tuple[str, str], dict[str, Any]] | None = None,
 ) -> list[PoolSnapshot]:
-    funnel.add("l2b", "_input", len(pools))
     sec = raw["security"]
     cache_h = float(sec["cache_hours"])
     passed: list[PoolSnapshot] = []
     for pool in pools:
+        _l2_once(funnel, "l2b", "_input", pool)
         cached = store.get_security(pool.network, pool.token_address)
         if cached is not None and _cache_fresh(str(cached["checked_at"]), cache_h * 60, now):
             cached_ok = int(cached["passed"])
             if cached_ok:
                 passed.append(pool)
+                _l2_once(funnel, "l2b", "_passed", pool)
                 _remember_card(
                     card_fields, pool, _parse_security_info(str(cached["result_json"]))
                 )
             else:
-                funnel.add("l2b", "cached_reject")
+                _l2_once(funnel, "l2b", "cached_reject", pool)
             continue
         try:
             info = await client.token_info(pool.network, pool.token_address)
         except CgHttpError as exc:
             if exc.status == 404:
-                funnel.add("l2b", "token_info_404")
+                _l2_once(funnel, "l2b", "token_info_404", pool)
                 store.put_security(pool.network, pool.token_address, "{}", False, now.isoformat())
                 continue
             raise
-        ok, rule = eval_l2b_info(info, pool.network, sec, now, funnel)
+        ok, rule = eval_l2b_info(info, pool.network, sec, now, funnel, source=pool.source)
         store.put_security(
             pool.network,
             pool.token_address,
@@ -390,10 +404,10 @@ async def run_l2b(
         )
         if ok:
             passed.append(pool)
+            _l2_once(funnel, "l2b", "_passed", pool)
             _remember_card(card_fields, pool, info)
         elif rule:
-            funnel.add("l2b", rule)
-    funnel.add("l2b", "_passed", len(passed))
+            _l2_once(funnel, "l2b", rule, pool)
     return passed
 
 
@@ -403,6 +417,7 @@ def eval_l2b_info(
     sec: dict[str, Any],
     now: datetime,
     funnel: Funnel | None,
+    source: str | None = None,
 ) -> tuple[bool, str | None]:
     data = as_dict(info.get("data")) if isinstance(info.get("data"), dict) else info
     attrs = as_dict(data.get("attributes") if isinstance(data, dict) else None)
@@ -429,7 +444,10 @@ def eval_l2b_info(
     def _unknown(field: str, rule: str) -> tuple[bool, str | None] | None:
         mode = unknown.get(field) or "pass_and_log"
         if funnel is not None:
-            funnel.add("l2b", f"missing_{rule}")
+            if source:
+                funnel.add_src("l2b", f"missing_{rule}", source)
+            else:
+                funnel.add("l2b", f"missing_{rule}")
         if mode == "reject":
             return False, f"missing_{rule}"
         return None

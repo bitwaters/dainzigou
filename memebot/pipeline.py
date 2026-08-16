@@ -16,6 +16,48 @@ from memebot.watch import Watcher, cooldown_active
 QUEUE_KEY = "new_pools_queue"
 
 
+def admit_block_reason(
+    pool: PoolSnapshot,
+    watcher: Watcher,
+    store: Store,
+    raw: dict[str, Any],
+    now: datetime,
+) -> str | None:
+    if watcher.key(pool.network, pool.token_address) in watcher.sessions:
+        return "already_watching"
+    if store.has_live_signal(pool.network, pool.token_address, "confirmed"):
+        return "already_confirmed"
+    if cooldown_active(
+        store,
+        pool.network,
+        pool.token_address,
+        max_timeouts=int(raw["watch"]["timeout_cooldown"]["max_timeouts"]),
+        cooldown_h=float(raw["watch"]["timeout_cooldown"]["cooldown_h"]),
+        now=now,
+    ):
+        return "cooldown"
+    return None
+
+
+def drop_unadmittable(
+    pools: list[PoolSnapshot],
+    watcher: Watcher,
+    store: Store,
+    raw: dict[str, Any],
+    now: datetime,
+    funnel: Funnel,
+    layer: str,
+) -> list[PoolSnapshot]:
+    open_pools: list[PoolSnapshot] = []
+    for pool in pools:
+        reason = admit_block_reason(pool, watcher, store, raw, now)
+        if reason is None:
+            open_pools.append(pool)
+            continue
+        funnel.add_src(layer, reason, pool.source)
+    return open_pools
+
+
 def m15_admit_ok(pool: PoolSnapshot, raw: dict[str, Any]) -> bool:
     floor = ((raw.get("watch") or {}).get("admit") or {}).get("min_m15_pct")
     if floor is None:
@@ -157,6 +199,26 @@ def apply_maturation_queue(
     return ready
 
 
+def enabled_collect_streams(raw: dict[str, Any]) -> list[str]:
+    streams = raw.get("streams") or {}
+    out: list[str] = []
+    source = str(streams.get("source") or "")
+    if source and (streams.get(source) or {}).get("enabled"):
+        out.append(source)
+    for name in ("trending_5m", "trending_1h"):
+        if name != source and (streams.get(name) or {}).get("enabled"):
+            out.append(name)
+    return out
+
+
+def recent_ttl_sec(raw: dict[str, Any]) -> float:
+    streams = raw.get("streams") or {}
+    intervals: list[float] = []
+    for name in enabled_collect_streams(raw):
+        intervals.append(float(streams[name]["interval_sec"]))
+    return min(intervals) if intervals else 0.0
+
+
 async def collect_stream(
     client: CgClient, raw: dict[str, Any], stream: str
 ) -> list[tuple[str, dict[str, Any]]]:
@@ -201,22 +263,6 @@ async def collect_stream(
     raise ValueError(f"unknown stream: {stream}")
 
 
-async def collect_batches(
-    client: CgClient, raw: dict[str, Any]
-) -> list[tuple[str, dict[str, Any]]]:
-    batches: list[tuple[str, dict[str, Any]]] = []
-    source = str(raw["streams"]["source"])
-    if source == "megafilter" and raw["streams"]["megafilter"]["enabled"]:
-        batches.extend(await collect_stream(client, raw, "megafilter"))
-    elif source == "new_pools" and raw["streams"]["new_pools"]["enabled"]:
-        batches.extend(await collect_stream(client, raw, "new_pools"))
-    if raw["streams"]["trending_5m"]["enabled"]:
-        batches.extend(await collect_stream(client, raw, "trending_5m"))
-    if raw["streams"]["trending_1h"]["enabled"]:
-        batches.extend(await collect_stream(client, raw, "trending_1h"))
-    return batches
-
-
 async def run_cycle(
     *,
     client: CgClient,
@@ -227,20 +273,27 @@ async def run_cycle(
     config_hash: str,
 ) -> list[PoolSnapshot]:
     funnel = Funnel(store, now)
-    try:
-        batches = await collect_batches(client, raw)
-    except CgError:
-        return []
-    return await process_batches(
-        batches=batches,
-        client=client,
-        store=store,
-        raw=raw,
-        watcher=watcher,
-        now=now,
-        config_hash=config_hash,
-        funnel=funnel,
-    )
+    recent: dict[str, datetime] = {}
+    ttl = recent_ttl_sec(raw)
+    last: list[PoolSnapshot] = []
+    for stream in enabled_collect_streams(raw):
+        try:
+            batches = await collect_stream(client, raw, stream)
+        except CgError:
+            continue
+        last = await process_batches(
+            batches=batches,
+            client=client,
+            store=store,
+            raw=raw,
+            watcher=watcher,
+            now=now,
+            config_hash=config_hash,
+            funnel=funnel,
+            recent_ids=recent,
+            recent_ttl_sec=ttl,
+        )
+    return last
 
 
 async def process_batches(
@@ -263,7 +316,9 @@ async def process_batches(
         pools = apply_maturation_queue(store, pools, raw, now)
     if recent_ids is not None:
         pools = drop_recently_seen(pools, recent_ids, now, recent_ttl_sec)
-    funnel.add("stream", "_raw", len(pools))
+    pools = drop_unadmittable(pools, watcher, store, raw, now, funnel, "stream")
+    for pool in pools:
+        funnel.add_once("stream", "_raw", pool.pool_id, pool.source)
     survivors = run_l0_l1(pools, raw, store, now, funnel)
     survivors = await run_l2a(survivors, raw, store, client, now, funnel)
     card_fields: dict[tuple[str, str], dict[str, Any]] = {}
@@ -288,34 +343,32 @@ async def process_batches(
         if extra:
             feats.update(extra)
         scored.append((pool, total, feats))
+        funnel.add_once("scoring", "_input", pool.pool_id, pool.source)
     n = int(raw["scoring"]["candidates_per_chain_per_cycle"])
-    funnel.add("scoring", "_input", len(scored))
     if ((raw.get("watch") or {}).get("admit") or {}).get("min_m15_pct") is not None:
         green: list[tuple[PoolSnapshot, float, dict[str, Any]]] = []
-        red_n = 0
         for item in scored:
             if m15_admit_ok(item[0], raw):
                 green.append(item)
             else:
-                red_n += 1
-        funnel.add("scoring", "m15_not_green", red_n)
+                funnel.add_once("scoring", "m15_not_green", item[0].pool_id, item[0].source)
         scored = green
-    picked, rest = pick_top_n(scored, n)
-    funnel.add("scoring", "_passed", len(picked))
-    funnel.add("scoring", "not_top_n", len(rest))
+    ready: list[tuple[PoolSnapshot, float, dict[str, Any]]] = []
+    for item in scored:
+        reason = admit_block_reason(item[0], watcher, store, raw, now)
+        if reason is None:
+            ready.append(item)
+            continue
+        funnel.add_src("scoring", reason, item[0].source)
+    picked, rest = pick_top_n(ready, n)
+    for pool, _score, _feats in picked:
+        funnel.add_once("scoring", "_passed", pool.pool_id, pool.source)
+    for pool, _score, _feats in rest:
+        funnel.add_once("scoring", "not_top_n", pool.pool_id, pool.source)
     day = now.date().isoformat()
     watch_calls = store.kind_calls(day, "watch")
     for pool, score, features in picked:
-        if store.has_live_signal(pool.network, pool.token_address, "confirmed"):
-            continue
-        if cooldown_active(
-            store,
-            pool.network,
-            pool.token_address,
-            max_timeouts=int(raw["watch"]["timeout_cooldown"]["max_timeouts"]),
-            cooldown_h=float(raw["watch"]["timeout_cooldown"]["cooldown_h"]),
-            now=now,
-        ):
+        if admit_block_reason(pool, watcher, store, raw, now) is not None:
             continue
         if not watcher.can_add(now, watch_calls):
             break

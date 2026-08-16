@@ -16,7 +16,7 @@ from memebot.events import EventBus
 from memebot.filters import Funnel
 from memebot.heartbeat import write_heartbeat
 from memebot.notify import Notifier, payload_from_signal_row
-from memebot.pipeline import collect_stream, process_batches
+from memebot.pipeline import collect_stream, process_batches, recent_ttl_sec
 from memebot.store import Store, cleanup_config_from_raw
 from memebot.tracker import (
     build_daily_report,
@@ -162,15 +162,7 @@ class Runtime:
             return
 
     def _recent_ttl_sec(self) -> float:
-        raw = self.cfg.raw["streams"]
-        intervals: list[float] = []
-        source = str(raw["source"])
-        if raw.get(source, {}).get("enabled"):
-            intervals.append(float(raw[source]["interval_sec"]))
-        for name in ("trending_5m", "trending_1h"):
-            if raw.get(name, {}).get("enabled"):
-                intervals.append(float(raw[name]["interval_sec"]))
-        return min(intervals) if intervals else 0.0
+        return recent_ttl_sec(self.cfg.raw)
 
     async def _loop_stream(self, stream: str, interval: float) -> None:
         while not self._stop.is_set():
@@ -431,7 +423,11 @@ class Runtime:
         funnel_rows = [
             (str(r["layer"]), str(r["rule"]), int(r["n"])) for r in self.store.funnel_day(day)
         ]
-        l2 = [r for r in funnel_rows if r[0] in {"l2a", "l2b"} and not r[1].startswith("_")]
+        l2 = [
+            r
+            for r in funnel_rows
+            if r[0] in {"l2a", "l2b"} and ":" not in r[1] and not r[1].startswith("_")
+        ]
         top = max(l2, key=lambda x: x[2])[1] if l2 else None
         zero_days = 0
         alert_n = int(self.cfg.get("report.zero_signal_alert_days"))

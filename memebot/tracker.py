@@ -126,6 +126,8 @@ def build_daily_report(
     if top_l2_rule:
         lines.append(f"第2层贡献最大规则 {top_l2_rule}")
     for layer, rule, n in funnel:
+        if ":" in rule:
+            continue
         lines.append(f"漏斗 {layer}/{rule}={n}")
     if zero_days >= zero_alert_days:
         lines.append(f"⚠ 连续 {zero_days} 天零推送，确认条件可能过严")
