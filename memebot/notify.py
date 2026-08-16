@@ -65,6 +65,17 @@ def fmt_pct(value: Any) -> str | None:
     return f"{sign}{n:.1f}%"
 
 
+def display_mcap(market_cap_usd: Any, fdv_usd: Any) -> float | None:
+    """Prefer circulating market cap; new memes often only have FDV on the radar row."""
+    mc = _as_float(market_cap_usd)
+    if mc is not None and mc > 0:
+        return mc
+    fdv = _as_float(fdv_usd)
+    if fdv is not None and fdv > 0:
+        return fdv
+    return None
+
+
 def fmt_clock(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -121,42 +132,39 @@ def render_card(payload: dict[str, Any], raw: dict[str, Any]) -> tuple[str, dict
     symbol = sanitize_chain_text(str(payload.get("symbol") or "?"), max_len)
     name = sanitize_chain_text(str(payload.get("name") or ""), max_len)
     grade = str(payload.get("grade") or "")
-    label = "强" if grade == "strong" else "弱"
     network = str(payload.get("network") or "")
-    chain = _CHAIN_LABEL.get(network, network.upper() or "?")
+    chain = html.escape(_CHAIN_LABEL.get(network, network.upper() or "?"))
     ca = html.escape(str(payload.get("token_address") or ""), quote=True)
-    title = f"{label} ${symbol}"
+    chg = fmt_pct(payload.get("chg_1m")) or "—"
+    m5 = fmt_pct(payload.get("m5")) or "—"
+    h1 = fmt_pct(payload.get("h1")) or "—"
+    dist = fmt_pct(payload.get("dist")) or "—"
+    liq = fmt_usd(payload.get("reserve_usd")) or "—"
+    mc = fmt_usd(display_mcap(payload.get("market_cap_usd"), payload.get("fdv_usd"))) or "—"
+    mark = "🔥 强" if grade == "strong" else "⚡️ 弱"
+    head = f"<b>{mark}  ${symbol}</b>"
     if name and name != symbol:
-        title += f" · {name}"
-    lines = [
-        title,
-        html.escape(chain),
-        f"<code>{ca}</code>",
-        "",
-        (
-            f"1m {fmt_pct(payload.get('chg_1m')) or '—'} · "
-            f"m5 {fmt_pct(payload.get('m5')) or '—'} · "
-            f"h1 {fmt_pct(payload.get('h1')) or '—'} · "
-            f"dist {fmt_pct(payload.get('dist')) or '—'}"
-        ),
-    ]
+        head += f"  {name}"
+    head += f"  {chain}"
     if payload.get("hide_net_buy"):
-        lines.append("近窗买 — · 卖 —")
+        buy, sell = "—", "—"
     else:
         buy = fmt_usd(payload.get("buy_usd")) or "$0"
         sell = fmt_usd(payload.get("sell_usd")) or "$0"
-        lines.append(f"近窗买 {buy} · 卖 {sell}")
-    liq = fmt_usd(payload.get("reserve_usd")) or "—"
-    fdv = fmt_usd(payload.get("fdv_usd")) or "—"
-    mc = fmt_usd(payload.get("market_cap_usd"))
-    lines.append(f"流动性 {liq} · FDV {fdv} · 市值 {mc if mc else '—'}")
-    clock = fmt_clock(payload.get("created_at"))
-    if clock:
-        lines.append(clock)
     security = "安全通过"
     if network == "solana":
         security += " · 权限未弃权" if payload.get("authority_open") else " · 权限已弃权"
-    lines.append(security)
+    clock = fmt_clock(payload.get("created_at"))
+    if clock:
+        security += f"  {clock}"
+    lines = [
+        head,
+        f"<code>{ca}</code>",
+        f"📈 1m <b>{chg}</b>  5m {m5}  1h {h1}  距高 {dist}",
+        f"🟢 买 {buy}  🔴 卖 {sell}",
+        f"💧 流动性 {liq}  💰 市值 {mc}",
+        f"🛡 {security}",
+    ]
     token_q = quote(str(payload.get("token_address") or ""), safe="")
     gmgn = _GMGN_CHAIN.get(network, network)
     dbot = _DBOT_CHAIN.get(network, network)
