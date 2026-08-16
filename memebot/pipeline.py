@@ -231,7 +231,7 @@ def enabled_collect_streams(raw: dict[str, Any]) -> list[str]:
     source = str(streams.get("source") or "")
     if source and (streams.get(source) or {}).get("enabled"):
         out.append(source)
-    for name in ("trending_5m", "trending_1h"):
+    for name in ("rising", "trending_5m", "trending_1h"):
         if name != source and (streams.get(name) or {}).get("enabled"):
             out.append(name)
     return out
@@ -262,6 +262,30 @@ async def collect_stream(
                     reserve_in_usd_min=float(pre["reserve_in_usd_min"]),
                     sort=str(pre["sort"]),
                     page=page,
+                ),
+            )
+            for page in range(1, pages + 1)
+        ]
+    if stream == "rising":
+        base_pre = raw["streams"]["megafilter"]["prefilter"]
+        pre = raw["streams"]["rising"]["prefilter"]
+        pages = max(1, int(raw["streams"]["rising"]["pages"]))
+        return [
+            (
+                "rising",
+                await client.megafilter(
+                    networks=nets,
+                    pool_created_hour_min=float(base_pre["pool_created_hour_min"]),
+                    pool_created_hour_max=float(base_pre["pool_created_hour_max"]),
+                    reserve_in_usd_min=float(base_pre["reserve_in_usd_min"]),
+                    sort=str(pre["sort"]),
+                    page=page,
+                    extra_params={
+                        "price_change_percentage_min": float(pre["price_change_percentage_min"]),
+                        "price_change_percentage_duration": str(
+                            pre["price_change_percentage_duration"]
+                        ),
+                    },
                 ),
             )
             for page in range(1, pages + 1)
@@ -366,6 +390,9 @@ async def process_batches(
             seen_at,
             seen_at,
             symbol=pool.symbol,
+            pool_created_at=(
+                pool.pool_created_at.isoformat() if pool.pool_created_at else None
+            ),
         )
     scored: list[tuple[PoolSnapshot, float, dict[str, Any]]] = []
     for pool in survivors:
@@ -375,9 +402,19 @@ async def process_batches(
             feats.update(extra)
         scored.append((pool, total, feats))
         funnel.add_once("scoring", "_input", pool.pool_id, pool.source)
+    min_score = (raw.get("scoring") or {}).get("min_admit_score")
+    if min_score is not None:
+        kept: list[tuple[PoolSnapshot, float, dict[str, Any]]] = []
+        for item in scored:
+            if item[1] >= float(min_score):
+                kept.append(item)
+            else:
+                funnel.add_once("scoring", "below_min_score", item[0].pool_id, item[0].source)
+        scored = kept
     n = int(raw["scoring"]["candidates_per_chain_per_cycle"])
     admit = (raw.get("watch") or {}).get("admit") or {}
-    if any(admit.get(k) is not None for k in ("min_m5_pct", "min_m5_pct_on_red_m15", "min_m15_pct")):
+    admit_keys = ("min_m5_pct", "min_m5_pct_on_red_m15", "min_m15_pct")
+    if any(admit.get(k) is not None for k in admit_keys):
         green: list[tuple[PoolSnapshot, float, dict[str, Any]]] = []
         for item in scored:
             if admit_momentum_ok(item[0], raw):

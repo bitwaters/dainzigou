@@ -131,6 +131,15 @@ class Runtime:
                     name="new_pools",
                 )
             )
+        if self.cfg.get("streams.rising.enabled"):
+            tasks.append(
+                asyncio.create_task(
+                    self._loop_stream(
+                        "rising", float(self.cfg.get("streams.rising.interval_sec"))
+                    ),
+                    name="rising",
+                )
+            )
         if self.cfg.get("streams.trending_5m.enabled"):
             tasks.append(
                 asyncio.create_task(
@@ -202,8 +211,14 @@ class Runtime:
         while not self._stop.is_set():
             now = datetime.now(UTC)
             funnel = Funnel(self.store, now)
-            for sess in list(self.watcher.sessions.values()):
-                await self._poll_one_watch(sess, now, window, min_usd, funnel)
+            sessions = list(self.watcher.sessions.values())
+            await asyncio.gather(
+                *(
+                    self._poll_one_watch(sess, now, window, min_usd, funnel)
+                    for sess in sessions
+                ),
+                return_exceptions=True,
+            )
             await self._sleep(interval)
 
     async def _poll_one_watch(
@@ -229,6 +244,8 @@ class Runtime:
                 entered_at=sess.entered_at,
                 seen_peak=sess.peak_price,
             )
+            if not self.watcher.is_active(sess):
+                return
             if result.peak_price is not None:
                 sess.peak_price = result.peak_price
             if result.confirmed:
@@ -239,13 +256,17 @@ class Runtime:
             elif (now - sess.entered_at).total_seconds() >= window * 60:
                 self.watcher.finish(sess, now, "timeout", result.stats, funnel.add)
         except Exception:
+            if not self.watcher.is_active(sess):
+                return
             elapsed = (now - sess.entered_at).total_seconds()
             timed_out = elapsed >= window * 60
             if timed_out:
                 self.watcher.finish(sess, now, "timeout", ConfirmStats(), funnel.add)
             log.exception("watch poll failed %s", sess.pool_id)
 
-    async def _emit_confirmed(self, sess: Any, stats: Any, now: datetime, last_price: float | None) -> None:
+    async def _emit_confirmed(
+        self, sess: Any, stats: Any, now: datetime, last_price: float | None
+    ) -> None:
         tx = sess.features.get("tx") or {}
         pool_buyers_m15 = (tx.get("m15") or {}).get("buyers")
         fdv_now = scale_from_baseline(sess.features.get("fdv_usd"), sess.baseline, last_price)
@@ -309,58 +330,75 @@ class Runtime:
 
     async def _loop_track(self) -> None:
         hours = float(self.cfg.get("tracking.scan_interval_h"))
+        fails = 0
         while not self._stop.is_set():
             if self.cfg.get("tracking.enabled"):
-                await self._track_once(datetime.now(UTC))
+                try:
+                    await self._track_once(datetime.now(UTC))
+                    fails = 0
+                except Exception:
+                    fails += 1
+                    log.exception("track cycle failed; skip round")
+                    threshold = int(self.cfg.get("telegram.consecutive_failure_alert"))
+                    if fails >= threshold:
+                        await self.notifier.alert(
+                            f"结果追踪连续失败 {fails} 次",
+                            "track.fail",
+                            datetime.now(UTC),
+                        )
             await self._sleep(hours * 3600)
 
     async def _track_once(self, now: datetime) -> None:
-        after = float(self.cfg.get("tracking.evaluate_after_h"))
-        cutoff = now - timedelta(hours=after)
         drawdown = float(self.cfg.get("tracking.rug.price_drawdown_pct"))
         confirm_h = float(self.cfg.get("tracking.rug.confirm_hours"))
-        for row in self.store.list_signals("sent"):
-            created = datetime.fromisoformat(str(row["created_at"]))
-            if created.tzinfo is None:
-                created = created.replace(tzinfo=UTC)
-            if created > cutoff:
-                continue
-            await self._eval_row(
-                "signal",
-                int(row["id"]),
-                str(row["network"]),
-                str(row["token_address"]),
-                float(row["price_at_signal"] or 0),
-                created,
-                now,
-                drawdown,
-                confirm_h,
-            )
-        if self.cfg.get("tracking.track_negatives"):
-            negs = self.store.read(
-                lambda c: c.execute(
-                    "SELECT * FROM watch_log "
-                    "WHERE outcome IN ('timeout','evicted') AND ended_at IS NOT NULL"
-                ).fetchall()
-            )
-            for row in negs:
-                ended = datetime.fromisoformat(str(row["ended_at"]))
-                if ended.tzinfo is None:
-                    ended = ended.replace(tzinfo=UTC)
-                if ended > cutoff:
+        horizons = list(self.cfg.get("tracking.horizons") or [])
+        for horizon in horizons:
+            after = float(horizon["after_h"])
+            cutoff = now - timedelta(hours=after)
+            for row in self.store.list_signals("sent"):
+                created = datetime.fromisoformat(str(row["created_at"]))
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=UTC)
+                if created > cutoff:
                     continue
-                src = "watch_timeout" if row["outcome"] == "timeout" else "watch_evicted"
                 await self._eval_row(
-                    src,
+                    "signal",
                     int(row["id"]),
                     str(row["network"]),
                     str(row["token_address"]),
-                    float(row["baseline_price"] or 0),
-                    ended,
+                    float(row["price_at_signal"] or 0),
+                    created,
                     now,
                     drawdown,
                     confirm_h,
+                    horizon,
                 )
+            if self.cfg.get("tracking.track_negatives"):
+                negs = self.store.read(
+                    lambda c: c.execute(
+                        "SELECT * FROM watch_log "
+                        "WHERE outcome IN ('timeout','evicted') AND ended_at IS NOT NULL"
+                    ).fetchall()
+                )
+                for row in negs:
+                    ended = datetime.fromisoformat(str(row["ended_at"]))
+                    if ended.tzinfo is None:
+                        ended = ended.replace(tzinfo=UTC)
+                    if ended > cutoff:
+                        continue
+                    src = "watch_timeout" if row["outcome"] == "timeout" else "watch_evicted"
+                    await self._eval_row(
+                        src,
+                        int(row["id"]),
+                        str(row["network"]),
+                        str(row["token_address"]),
+                        float(row["baseline_price"] or 0),
+                        ended,
+                        now,
+                        drawdown,
+                        confirm_h,
+                        horizon,
+                    )
 
     async def _eval_row(
         self,
@@ -373,20 +411,28 @@ class Runtime:
         now: datetime,
         drawdown: float,
         confirm_h: float,
+        horizon: dict[str, Any],
     ) -> None:
-        existing = self.store.read(
-            lambda c: c.execute(
-                "SELECT id FROM signal_outcomes WHERE source = ? AND source_id = ?",
-                (source, source_id),
-            ).fetchone()
-        )
-        if existing:
+        after_h = int(horizon["after_h"])
+        if self.store.outcome_exists(source, source_id, after_h):
             return
-        tf = str(self.cfg.get("tracking.granularity.full.tf"))
-        agg = int(self.cfg.get("tracking.granularity.full.agg"))
-        payload = await self.client.token_ohlcv(
-            network, token, tf, aggregate=agg, include_empty_intervals=True
-        )
+        tf = str(horizon["tf"])
+        agg = int(horizon["agg"])
+        limit = int(horizon.get("limit") or 100)
+        window_end = start + timedelta(hours=after_h)
+        try:
+            payload = await self.client.token_ohlcv(
+                network,
+                token,
+                tf,
+                aggregate=agg,
+                include_empty_intervals=True,
+                limit=limit,
+                before_timestamp=int(window_end.timestamp()),
+            )
+        except Exception:
+            log.exception("track eval failed %s %s %sh", source, source_id, after_h)
+            return
         rows = ohlcv_rows(payload)
         metrics = compute_metrics(
             rows,
@@ -396,7 +442,7 @@ class Runtime:
             confirm_hours=confirm_h,
         )
         oid = self.store.insert_outcome(
-            source, source_id, network, token, now.isoformat(), json.dumps(payload)
+            source, source_id, network, token, after_h, now.isoformat(), json.dumps(payload)
         )
         self.store.update_outcome_metrics(
             oid,

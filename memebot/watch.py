@@ -48,19 +48,18 @@ class ConfirmResult:
 
 
 def _token_price_usd(attrs: dict[str, Any], kind: str) -> float | None:
-    # buy: token is "to"; sell: token is "from". Using price_to for both
-    # treats a sell as quote-token USD (e.g. SOL ~$75) and explodes confirm %.
-    primary = "price_to_in_usd" if kind == "buy" else "price_from_in_usd"
-    secondary = "price_from_in_usd" if kind == "buy" else "price_to_in_usd"
-    for key in (primary, secondary):
-        raw = attrs.get(key)
-        if raw is None or raw == "":
-            continue
-        try:
-            return float(raw)
-        except (TypeError, ValueError):
-            continue
-    return None
+    # buy: token is "to"; sell: token is "from". Only the primary field is
+    # used: the fallback field holds the OTHER side's USD price (e.g. quote
+    # SOL ~$75), which explodes price-change %, pollutes peak/drawdown, and
+    # even passes the sane band when the real price field is missing.
+    key = "price_to_in_usd" if kind == "buy" else "price_from_in_usd"
+    raw = attrs.get(key)
+    if raw is None or raw == "":
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def parse_trades(
@@ -343,11 +342,15 @@ class Watcher:
             "aborted_rule": stats.aborted_rule,
         }
         self.store.finish_watch(sess.watch_id, now.isoformat(), outcome, json.dumps(payload))
-        self.sessions.pop(self.key(sess.network, sess.token_address), None)
+        if self.sessions.get(self.key(sess.network, sess.token_address)) is sess:
+            self.sessions.pop(self.key(sess.network, sess.token_address), None)
         if outcome == "confirmed":
             funnel_add("watch", "_passed")
         elif outcome in {"timeout", "evicted"}:
             funnel_add("watch", outcome)
+
+    def is_active(self, sess: WatchSession) -> bool:
+        return self.sessions.get(self.key(sess.network, sess.token_address)) is sess
 
     def abort_all(self, now: datetime) -> None:
         for sess in list(self.sessions.values()):

@@ -15,7 +15,7 @@ from pathlib import Path
 from shutil import copy2
 from typing import Any, TypeVar, cast
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 TABLES = (
     "pools",
     "signals",
@@ -27,6 +27,7 @@ TABLES = (
     "credit_usage",
     "event_log",
     "funnel_counts",
+    "funnel_seen",
     "runtime_kv",
 )
 FUNNEL_LAYERS = frozenset({"stream", "l0", "l1", "l2a", "l2b", "scoring", "watch"})
@@ -98,6 +99,7 @@ CREATE TABLE IF NOT EXISTS signal_outcomes (
   source_id INTEGER NOT NULL,
   network TEXT NOT NULL,
   token_address TEXT NOT NULL,
+  evaluated_after_h INTEGER NOT NULL DEFAULT 24,
   evaluated_at TEXT NOT NULL,
   baseline_price REAL,
   max_gain_pct REAL,
@@ -108,6 +110,8 @@ CREATE TABLE IF NOT EXISTS signal_outcomes (
   is_rug INTEGER,
   ohlcv_json TEXT
 );
+CREATE UNIQUE INDEX IF NOT EXISTS ux_signal_outcomes_eval
+  ON signal_outcomes(source, source_id, evaluated_after_h);
 CREATE INDEX IF NOT EXISTS idx_signal_outcomes_evaluated_at ON signal_outcomes(evaluated_at);
 CREATE INDEX IF NOT EXISTS idx_signal_outcomes_network_token
   ON signal_outcomes(network, token_address);
@@ -167,6 +171,15 @@ CREATE TABLE IF NOT EXISTS funnel_counts (
   PRIMARY KEY (date_utc, layer, rule)
 );
 
+CREATE TABLE IF NOT EXISTS funnel_seen (
+  date_utc TEXT NOT NULL,
+  layer TEXT NOT NULL,
+  rule TEXT NOT NULL,
+  pool_id TEXT NOT NULL,
+  PRIMARY KEY (date_utc, layer, rule, pool_id)
+);
+CREATE INDEX IF NOT EXISTS idx_funnel_seen_date ON funnel_seen(date_utc);
+
 CREATE TABLE IF NOT EXISTS runtime_kv (
   key TEXT PRIMARY KEY,
   value TEXT
@@ -183,6 +196,19 @@ CREATE TABLE symbol_counter (
   PRIMARY KEY (network, symbol_norm, hour_bucket, token_address)
 );
 CREATE INDEX IF NOT EXISTS idx_symbol_counter_hour_bucket ON symbol_counter(hour_bucket);
+"""
+
+_MIGRATE_3_SQL = """
+CREATE UNIQUE INDEX IF NOT EXISTS ux_signal_outcomes_eval
+  ON signal_outcomes(source, source_id, evaluated_after_h);
+CREATE TABLE IF NOT EXISTS funnel_seen (
+  date_utc TEXT NOT NULL,
+  layer TEXT NOT NULL,
+  rule TEXT NOT NULL,
+  pool_id TEXT NOT NULL,
+  PRIMARY KEY (date_utc, layer, rule, pool_id)
+);
+CREATE INDEX IF NOT EXISTS idx_funnel_seen_date ON funnel_seen(date_utc);
 """
 
 T = TypeVar("T")
@@ -283,6 +309,19 @@ class Store:
                         conn.executescript(_SCHEMA_SQL)
                     elif version == 2:
                         conn.executescript(_MIGRATE_2_SQL)
+                    elif version == 3:
+                        cols = {
+                            str(r[1])
+                            for r in conn.execute(
+                                "PRAGMA table_info(signal_outcomes)"
+                            ).fetchall()
+                        }
+                        if "evaluated_after_h" not in cols:
+                            conn.execute(
+                                "ALTER TABLE signal_outcomes ADD COLUMN "
+                                "evaluated_after_h INTEGER NOT NULL DEFAULT 24"
+                            )
+                        conn.executescript(_MIGRATE_3_SQL)
                     else:
                         raise RuntimeError(f"missing migration for user_version {version}")
                     conn.execute(f"PRAGMA user_version = {version}")
@@ -418,6 +457,19 @@ class Store:
             ).fetchone()
         )
         return 0 if row is None else int(row[0])
+
+    def funnel_seen_once(self, date_utc: str, layer: str, rule: str, pool_id: str) -> bool:
+        """True if this (day, layer, rule, pool) combo was never recorded before."""
+
+        def _fn(conn: sqlite3.Connection) -> bool:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO funnel_seen(date_utc, layer, rule, pool_id) "
+                "VALUES (?, ?, ?, ?)",
+                (date_utc, layer, rule, pool_id),
+            )
+            return cur.rowcount == 1
+
+        return self.submit(_fn)
 
     def add_credits(self, date_utc: str, kind: str, calls: int = 1, credits: int = 1) -> int:
         if kind not in CREDIT_KINDS:
@@ -855,18 +907,32 @@ class Store:
         source_id: int,
         network: str,
         token_address: str,
+        evaluated_after_h: int,
         evaluated_at: str,
         ohlcv_json: str | None = None,
     ) -> int:
         def _fn(conn: sqlite3.Connection) -> int:
             cur = conn.execute(
                 "INSERT INTO signal_outcomes(source, source_id, network, token_address, "
-                "evaluated_at, ohlcv_json) VALUES (?, ?, ?, ?, ?, ?)",
-                (source, source_id, network, token_address, evaluated_at, ohlcv_json),
+                "evaluated_after_h, evaluated_at, ohlcv_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    source, source_id, network, token_address, evaluated_after_h,
+                    evaluated_at, ohlcv_json,
+                ),
             )
             return int(cur.lastrowid or 0)
 
         return self.submit(_fn)
+
+    def outcome_exists(self, source: str, source_id: int, evaluated_after_h: int) -> bool:
+        row = self.read(
+            lambda c: c.execute(
+                "SELECT 1 FROM signal_outcomes "
+                "WHERE source = ? AND source_id = ? AND evaluated_after_h = ? LIMIT 1",
+                (source, source_id, evaluated_after_h),
+            ).fetchone()
+        )
+        return row is not None
 
     def upsert_pool(
         self,
@@ -877,14 +943,25 @@ class Store:
         first_seen_at: str,
         last_seen_at: str,
         symbol: str | None = None,
+        pool_created_at: str | None = None,
     ) -> None:
         def _fn(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "INSERT INTO pools(network, pool_id, address, token_address, symbol, "
-                "first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "pool_created_at, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(network, pool_id) DO UPDATE SET "
-                "last_seen_at = excluded.last_seen_at, symbol = excluded.symbol",
-                (network, pool_id, address, token_address, symbol, first_seen_at, last_seen_at),
+                "last_seen_at = excluded.last_seen_at, symbol = excluded.symbol, "
+                "pool_created_at = COALESCE(excluded.pool_created_at, pools.pool_created_at)",
+                (
+                    network,
+                    pool_id,
+                    address,
+                    token_address,
+                    symbol,
+                    pool_created_at,
+                    first_seen_at,
+                    last_seen_at,
+                ),
             )
 
         self.submit(_fn)
@@ -947,6 +1024,7 @@ class Store:
             )
             conn.execute("DELETE FROM credit_usage WHERE date_utc < ?", (credit_cut,))
             conn.execute("DELETE FROM funnel_counts WHERE date_utc < ?", (credit_cut,))
+            conn.execute("DELETE FROM funnel_seen WHERE date_utc < ?", (credit_cut,))
             conn.execute("DELETE FROM event_log WHERE ts < ?", (event_cut,))
             conn.execute("DELETE FROM security_cache WHERE checked_at < ?", (security_cut,))
             if ungrad_cut is not None:

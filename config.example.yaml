@@ -10,7 +10,7 @@ runtime:
   http:
     timeout_sec: 10
     connect_timeout_sec: 5
-    max_connections: 10
+    max_connections: 20
     user_agent: "memebot/1.0"
   retry:
     max_attempts: 3
@@ -39,13 +39,23 @@ streams:
   source: megafilter                  # megafilter | new_pools
   megafilter:
     enabled: true
-    interval_sec: 60
-    pages: 2                          # 页数，从第 1 页循环到第 N 页
+    interval_sec: 30                  # 贴近 30s 付费缓存下限
+    pages: 3                          # 页数，从第 1 页循环到第 N 页
     prefilter:                        # 服务端粗筛，须比本地门槛宽松一档
-      pool_created_hour_min: 0.2
-      pool_created_hour_max: 7
+      pool_created_hour_min: 0.08
+      pool_created_hour_max: 8
       reserve_in_usd_min: 10000
       sort: pool_created_at_desc
+  rising:                             # 上涨雷达：服务端按涨幅过滤，见开发文档 §3.1.4
+    enabled: true
+    interval_sec: 60
+    pages: 2
+    prefilter:
+      sort: h1_price_change_percentage_desc
+      price_change_percentage_min: 10
+      price_change_percentage_duration: 1h
+    max_fdv_usd: null                 # null = 继承 collection_gates
+    max_age_h: null                   # null = 继承 business_gates
   new_pools:                          # 回退方案，source=new_pools 时生效
     enabled: false
     interval_sec: 60
@@ -56,18 +66,18 @@ streams:
       max_queue_size: 2000
   trending_5m:
     enabled: true
-    interval_sec: 120
+    interval_sec: 45
     duration: 5m
-    pages: 1
-    max_fdv_usd: 500000               # 覆盖全局；null = 继承 collection_gates
-    max_age_h: 12                     # 覆盖全局；null = 继承 business_gates
+    pages: 2
+    max_fdv_usd: 2000000              # 覆盖全局；null = 继承 collection_gates
+    max_age_h: 24                     # 覆盖全局；null = 继承 business_gates
   trending_1h:
-    enabled: false                    # 默认关；更易已走完一波
-    interval_sec: 120
+    enabled: true                     # 开发期默认开
+    interval_sec: 90
     duration: 1h
     pages: 1
-    max_fdv_usd: 500000
-    max_age_h: 12
+    max_fdv_usd: 2000000
+    max_age_h: 24
 
 # ── 第0层：采集过滤（免费字段）──────────────────
 collection_gates:
@@ -79,8 +89,8 @@ collection_gates:
       - "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c"     # WBNB
       - "0x55d398326f99059ff775485246999027b3197955"     # USDT
       - "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d"     # USDC
-  min_reserve_usd: 20000
-  max_fdv_usd: 500000
+  min_reserve_usd: 15000
+  max_fdv_usd: 800000
   max_fdv_to_reserve: 500
   max_turnover_ratio:
     window: m15
@@ -88,7 +98,7 @@ collection_gates:
   anti_wash:
     window: m15
     min_buyers_to_buys: 0.15
-    min_buyers_m15: 8
+    min_buyers_m15: 6
   copycat:
     enabled: true
     lookback_h: 24
@@ -97,7 +107,7 @@ collection_gates:
 
 # ── 第1层：业务门槛（免费字段）──────────────────
 business_gates:
-  min_age_min: 15
+  min_age_min: 10                     # 调整时须同步 megafilter.prefilter
   max_age_h: 6
   min_volume:
     window: m15
@@ -109,11 +119,11 @@ security:
     enabled: true
     size: 50
     min_main_pool_share: 0.5
-    cache:
+    cache:                            # 开发期以时效为先
       graduated_ttl_min: null         # null = 永久
-      ungraduated_recheck_min: 30
-      main_pool_share_ttl_min: 30
-  cache_hours: 24
+      ungraduated_recheck_min: 5
+      main_pool_share_ttl_min: 5
+  cache_hours: 1                      # 开发期 1h：安全属性时效优先
   honeypot_policy: reject_true        # reject_true | reject_unknown | off
   reject_ungraduated: true
   holders_max_staleness_h: 6
@@ -125,12 +135,12 @@ security:
     solana:
       mint_authority: "no"
       freeze_authority: "no"
-      max_dev_holding_pct: 10
-      max_top10_holding_pct: 60
+      max_dev_holding_pct: 15
+      max_top10_holding_pct: 80
       min_holders: 10
     bsc:
-      max_dev_holding_pct: 10
-      max_top10_holding_pct: 60
+      max_dev_holding_pct: 15
+      max_top10_holding_pct: 80
       min_holders: 10
 
 # ── 打分（四维，权重和必须为 1.0）───────────────
@@ -155,21 +165,22 @@ scoring:
   freshness:
     weight: 0.15
     normalize: {type: exp_decay, half_life_min: 240}
-  candidates_per_chain_per_cycle: 2
+  min_admit_score: 0.25               # 低于此分不进盯盘；null = 禁用
+  candidates_per_chain_per_cycle: 3
 
 # ── 盯盘 ────────────────────────────────────────
 watch:
-  poll_interval_sec: 60
-  max_concurrent: 10
-  min_dwell_sec: 180
-  window_min: 20
-  min_trade_usd: 10
+  poll_interval_sec: 10               # /trades 无缓存；官方建议 ≥10s
+  max_concurrent: 15
+  min_dwell_sec: 120
+  window_min: 15
+  min_trade_usd: 10                   # 粉尘过滤
   admit:
     min_m5_pct: 0                     # null = 禁用；缺 m5 视为未绿
     min_m5_pct_on_red_m15: 10         # m15<0 时的 m5 下限；null = 与 min_m5_pct 相同
     min_m15_pct: null                 # 额外 m15 门，默认关
   confirm:
-    confirm_min_buyers: 15
+    confirm_min_buyers: 12
     min_buyer_seller_ratio: 1.5
     min_buy_sell_ratio: 1.5
     min_price_change_pct: 0           # 相对进场未跌即可
@@ -180,17 +191,17 @@ watch:
     max_timeouts: 2
     cooldown_h: 2
   full_policy: evict_lowest
-  daily_call_cap: 3000
+  daily_call_cap: 30000               # 开发期护栏而非预算约束
 
 # ── 结果追踪 ────────────────────────────────────
 tracking:
   enabled: true
   track_negatives: true
-  evaluate_after_h: 24
   scan_interval_h: 1
-  granularity:
-    early: {tf: minute, agg: 1,  hours: 1}
-    full:  {tf: minute, agg: 15, hours: 24}
+  horizons:                           # 多周期评估，每对象合计 3 credits
+    - {after_h: 1,  tf: minute, agg: 1,  limit: 60}
+    - {after_h: 6,  tf: minute, agg: 5,  limit: 72}
+    - {after_h: 24, tf: minute, agg: 15, limit: 96}
   rug:
     reserve_drop_pct: 80              # Phase 1 忽略，只做价格回撤
     price_drawdown_pct: 90
@@ -198,7 +209,7 @@ tracking:
 
 # ── 额度守护 ────────────────────────────────────
 budget:
-  global_daily_call_cap: 8000
+  global_daily_call_cap: 50000
   monthly_credit_warn_pct: 60
 
 # ── Telegram ────────────────────────────────────

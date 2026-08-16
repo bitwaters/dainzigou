@@ -135,31 +135,32 @@ def build_daily_report(
     return "\n".join(lines)
 
 
+def _latest_outcomes(
+    store: Store, source: str, join_table: str, join_on: str, day_prefix: str, date_col: str
+) -> list[Any]:
+    return list(
+        store.read(
+            lambda c: c.execute(
+                f"SELECT o.* FROM signal_outcomes o "
+                f"JOIN {join_table} t ON o.source = ? AND o.source_id = t.{join_on} "
+                f"WHERE t.{date_col} LIKE ? "
+                f"AND o.evaluated_after_h = ("
+                f"  SELECT MAX(o2.evaluated_after_h) FROM signal_outcomes o2 "
+                f"  WHERE o2.source = o.source AND o2.source_id = o.source_id)",
+                (source, f"{day_prefix}%"),
+            ).fetchall()
+        )
+    )
+
+
 def report_stats(store: Store, day: str) -> dict[str, Any]:
     sent = store.sent_count_on(day)
-    signal_rows = store.read(
-        lambda c: c.execute(
-            "SELECT o.* FROM signal_outcomes o "
-            "JOIN signals s ON o.source = 'signal' AND o.source_id = s.id "
-            "WHERE s.created_at LIKE ?",
-            (f"{day}%",),
-        ).fetchall()
+    signal_rows = _latest_outcomes(store, "signal", "signals", "id", f"{day}%", "created_at")
+    timeout_rows = _latest_outcomes(
+        store, "watch_timeout", "watch_log", "id", f"{day}%", "started_at"
     )
-    timeout_rows = store.read(
-        lambda c: c.execute(
-            "SELECT o.* FROM signal_outcomes o "
-            "JOIN watch_log w ON o.source = 'watch_timeout' AND o.source_id = w.id "
-            "WHERE w.started_at LIKE ?",
-            (f"{day}%",),
-        ).fetchall()
-    )
-    evicted_rows = store.read(
-        lambda c: c.execute(
-            "SELECT o.* FROM signal_outcomes o "
-            "JOIN watch_log w ON o.source = 'watch_evicted' AND o.source_id = w.id "
-            "WHERE w.started_at LIKE ?",
-            (f"{day}%",),
-        ).fetchall()
+    evicted_rows = _latest_outcomes(
+        store, "watch_evicted", "watch_log", "id", f"{day}%", "started_at"
     )
     outcomes_n = len(signal_rows) + len(timeout_rows) + len(evicted_rows)
     doubled = 0

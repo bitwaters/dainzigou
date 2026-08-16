@@ -98,6 +98,14 @@ _REQUIRED_PATHS = (
     "streams.megafilter.prefilter.pool_created_hour_max",
     "streams.megafilter.prefilter.reserve_in_usd_min",
     "streams.megafilter.prefilter.sort",
+    "streams.rising.enabled",
+    "streams.rising.interval_sec",
+    "streams.rising.pages",
+    "streams.rising.prefilter.sort",
+    "streams.rising.prefilter.price_change_percentage_min",
+    "streams.rising.prefilter.price_change_percentage_duration",
+    "streams.rising.max_fdv_usd",
+    "streams.rising.max_age_h",
     "streams.new_pools.enabled",
     "streams.new_pools.interval_sec",
     "streams.new_pools.pages",
@@ -163,6 +171,7 @@ _REQUIRED_PATHS = (
     "scoring.freshness.weight",
     "scoring.freshness.normalize.type",
     "scoring.freshness.normalize.half_life_min",
+    "scoring.min_admit_score",
     "scoring.candidates_per_chain_per_cycle",
     "watch.poll_interval_sec",
     "watch.max_concurrent",
@@ -185,14 +194,8 @@ _REQUIRED_PATHS = (
     "watch.daily_call_cap",
     "tracking.enabled",
     "tracking.track_negatives",
-    "tracking.evaluate_after_h",
     "tracking.scan_interval_h",
-    "tracking.granularity.early.tf",
-    "tracking.granularity.early.agg",
-    "tracking.granularity.early.hours",
-    "tracking.granularity.full.tf",
-    "tracking.granularity.full.agg",
-    "tracking.granularity.full.hours",
+    "tracking.horizons",
     "tracking.rug.reserve_drop_pct",
     "tracking.rug.price_drawdown_pct",
     "tracking.rug.confirm_hours",
@@ -463,7 +466,7 @@ def validate(raw: dict[str, Any], stop_grace_period: float) -> None:
 
     base_fdv = _need(raw, "collection_gates.max_fdv_usd")
     base_age = _need(raw, "business_gates.max_age_h")
-    for name in ("trending_5m", "trending_1h"):
+    for name in ("trending_5m", "trending_1h", "rising"):
         fdv_path = f"streams.{name}.max_fdv_usd"
         age_path = f"streams.{name}.max_age_h"
         ov_fdv = _need(raw, fdv_path)
@@ -478,6 +481,62 @@ def validate(raw: dict[str, Any], stop_grace_period: float) -> None:
             n_age = _as_number(age_path, ov_age)
             if base_age is not None and n_age < _as_number("business_gates.max_age_h", base_age):
                 raise ConfigError(age_path, "must be >= business_gates.max_age_h")
+
+    rising_enabled = _need(raw, "streams.rising.enabled")
+    if rising_enabled is True:
+        rising_sort = _as_str(
+            "streams.rising.prefilter.sort", _need(raw, "streams.rising.prefilter.sort")
+        )
+        allowed_sorts = frozenset(
+            f"{w}_price_change_percentage_desc" for w in ("m5", "h1", "h6", "h24")
+        )
+        if rising_sort not in allowed_sorts:
+            raise ConfigError(
+                "streams.rising.prefilter.sort",
+                f"must be one of {sorted(allowed_sorts)}",
+            )
+        rising_dur = _as_str(
+            "streams.rising.prefilter.price_change_percentage_duration",
+            _need(raw, "streams.rising.prefilter.price_change_percentage_duration"),
+        )
+        if rising_dur not in {"5m", "1h", "6h", "24h"}:
+            raise ConfigError(
+                "streams.rising.prefilter.price_change_percentage_duration",
+                "must be one of 5m, 1h, 6h, 24h",
+            )
+        rising_min = _as_number(
+            "streams.rising.prefilter.price_change_percentage_min",
+            _need(raw, "streams.rising.prefilter.price_change_percentage_min"),
+        )
+        if rising_min <= 0:
+            raise ConfigError(
+                "streams.rising.prefilter.price_change_percentage_min", "must be > 0"
+            )
+
+    min_score = _need(raw, "scoring.min_admit_score")
+    if min_score is not None:
+        score_n = _as_number("scoring.min_admit_score", min_score)
+        if score_n < 0 or score_n > 1:
+            raise ConfigError("scoring.min_admit_score", "must be between 0 and 1")
+
+    horizons = _need(raw, "tracking.horizons")
+    if not isinstance(horizons, list) or not horizons:
+        raise ConfigError("tracking.horizons", "must be a non-empty list")
+    for i, horizon in enumerate(horizons):
+        path = f"tracking.horizons[{i}]"
+        if not isinstance(horizon, dict):
+            raise ConfigError(path, "must be a mapping")
+        after = horizon.get("after_h")
+        if not isinstance(after, int) or isinstance(after, bool) or after < 1:
+            raise ConfigError(f"{path}.after_h", "must be an integer >= 1")
+        if str(horizon.get("tf") or "") not in {"minute", "hour", "day"}:
+            raise ConfigError(f"{path}.tf", "must be minute, hour or day")
+        agg = horizon.get("agg")
+        if not isinstance(agg, int) or isinstance(agg, bool) or agg < 1:
+            raise ConfigError(f"{path}.agg", "must be an integer >= 1")
+        limit = horizon.get("limit")
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 1000:
+            raise ConfigError(f"{path}.limit", "must be an integer between 1 and 1000")
 
 
 def load_config(config_path: Path, env_path: Path | None = None) -> AppConfig:

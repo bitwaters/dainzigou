@@ -63,8 +63,7 @@ class Funnel:
     def add_once(self, layer: str, rule: str, pool_id: str, source: str) -> None:
         if source:
             self.add(layer, f"{source}:{rule}")
-        seen = self.store.incr_funnel(self.day, layer, f"_seen:{rule}:{pool_id}")
-        if seen == 1:
+        if self.store.funnel_seen_once(self.day, layer, rule, pool_id):
             self.add(layer, rule)
 
 

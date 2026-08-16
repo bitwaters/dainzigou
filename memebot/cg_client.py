@@ -300,6 +300,7 @@ class CgClient:
         include_empty_intervals: bool = True,
         limit: int | None = None,
         currency: str = "usd",
+        before_timestamp: int | None = None,
     ) -> dict[str, Any]:
         path = (
             f"/onchain/networks/{quote(network, safe='')}/tokens/"
@@ -312,4 +313,6 @@ class CgClient:
         }
         if limit is not None:
             params["limit"] = limit
+        if before_timestamp is not None:
+            params["before_timestamp"] = before_timestamp
         return await self.request(path, "track", params)
