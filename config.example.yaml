@@ -43,7 +43,7 @@ streams:
     pages: 1
     prefilter:                        # 服务端粗筛，须比本地门槛宽松一档
       pool_created_hour_min: 0.2
-      pool_created_hour_max: 50
+      pool_created_hour_max: 7
       reserve_in_usd_min: 10000
       sort: pool_created_at_desc
   new_pools:                          # 回退方案，source=new_pools 时生效
@@ -76,7 +76,7 @@ collection_gates:
       - "0x55d398326f99059ff775485246999027b3197955"     # USDT
       - "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d"     # USDC
   min_reserve_usd: 20000
-  max_fdv_usd: 50000000
+  max_fdv_usd: 200000
   max_fdv_to_reserve: 500
   max_turnover_ratio:
     window: m15
@@ -94,7 +94,7 @@ collection_gates:
 # ── 第1层：业务门槛（免费字段）──────────────────
 business_gates:
   min_age_min: 15
-  max_age_h: 48
+  max_age_h: 6
   min_volume:
     window: m15
     usd: 2000
@@ -160,11 +160,15 @@ watch:
   min_dwell_sec: 180
   window_min: 20
   min_trade_usd: 10
+  admit:
+    min_m15_pct: 0                    # null = 禁用；缺 m15 视为未绿
   confirm:
     confirm_min_buyers: 15
     min_buyer_seller_ratio: 1.5
     min_buy_sell_ratio: 2.0
     min_price_change_pct: 15
+    sane_pct_min: -50                 # 越界视为缺失，不确认
+    sane_pct_max: 500
   timeout_cooldown:
     max_timeouts: 2
     cooldown_h: 2

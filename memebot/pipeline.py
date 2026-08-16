@@ -16,6 +16,19 @@ from memebot.watch import Watcher, cooldown_active
 QUEUE_KEY = "new_pools_queue"
 
 
+def m15_admit_ok(pool: PoolSnapshot, raw: dict[str, Any]) -> bool:
+    floor = ((raw.get("watch") or {}).get("admit") or {}).get("min_m15_pct")
+    if floor is None:
+        return True
+    chg = (pool.price_change_usd or {}).get("m15")
+    if chg is None:
+        return False
+    try:
+        return float(chg) >= float(floor)
+    except (TypeError, ValueError):
+        return False
+
+
 def drop_recently_seen(
     pools: list[PoolSnapshot],
     recent: dict[str, datetime],
@@ -276,6 +289,16 @@ async def process_batches(
         scored.append((pool, total, feats))
     n = int(raw["scoring"]["candidates_per_chain_per_cycle"])
     funnel.add("scoring", "_input", len(scored))
+    if ((raw.get("watch") or {}).get("admit") or {}).get("min_m15_pct") is not None:
+        green: list[tuple[PoolSnapshot, float, dict[str, Any]]] = []
+        red_n = 0
+        for item in scored:
+            if m15_admit_ok(item[0], raw):
+                green.append(item)
+            else:
+                red_n += 1
+        funnel.add("scoring", "m15_not_green", red_n)
+        scored = green
     picked, rest = pick_top_n(scored, n)
     funnel.add("scoring", "_passed", len(picked))
     funnel.add("scoring", "not_top_n", len(rest))

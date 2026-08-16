@@ -165,10 +165,13 @@ _REQUIRED_PATHS = (
     "watch.min_dwell_sec",
     "watch.window_min",
     "watch.min_trade_usd",
+    "watch.admit.min_m15_pct",
     "watch.confirm.confirm_min_buyers",
     "watch.confirm.min_buyer_seller_ratio",
     "watch.confirm.min_buy_sell_ratio",
     "watch.confirm.min_price_change_pct",
+    "watch.confirm.sane_pct_min",
+    "watch.confirm.sane_pct_max",
     "watch.timeout_cooldown.max_timeouts",
     "watch.timeout_cooldown.cooldown_h",
     "watch.full_policy",
@@ -362,6 +365,16 @@ def validate(raw: dict[str, Any], stop_grace_period: float) -> None:
             "streams.megafilter.prefilter.pool_created_hour_min",
             "pool_created_hour_min * 60 must be <= business_gates.min_age_min",
         )
+    pre_age_max = _as_number(
+        "streams.megafilter.prefilter.pool_created_hour_max",
+        _need(raw, "streams.megafilter.prefilter.pool_created_hour_max"),
+    )
+    max_age_h = _as_number("business_gates.max_age_h", _need(raw, "business_gates.max_age_h"))
+    if pre_age_max < max_age_h:
+        raise ConfigError(
+            "streams.megafilter.prefilter.pool_created_hour_max",
+            "must be >= business_gates.max_age_h",
+        )
     pre_reserve = _as_number(
         "streams.megafilter.prefilter.reserve_in_usd_min",
         _need(raw, "streams.megafilter.prefilter.reserve_in_usd_min"),
@@ -399,6 +412,31 @@ def validate(raw: dict[str, Any], stop_grace_period: float) -> None:
     )
     if watch_cap >= global_cap:
         raise ConfigError("watch.daily_call_cap", "must be < budget.global_daily_call_cap")
+
+    admit_m15 = _need(raw, "watch.admit.min_m15_pct")
+    if admit_m15 is not None:
+        _as_number("watch.admit.min_m15_pct", admit_m15)
+
+    min_chg = _as_number(
+        "watch.confirm.min_price_change_pct",
+        _need(raw, "watch.confirm.min_price_change_pct"),
+    )
+    sane_min = _need(raw, "watch.confirm.sane_pct_min")
+    sane_max = _need(raw, "watch.confirm.sane_pct_max")
+    lo = _as_number("watch.confirm.sane_pct_min", sane_min) if sane_min is not None else None
+    hi = _as_number("watch.confirm.sane_pct_max", sane_max) if sane_max is not None else None
+    if lo is not None and hi is not None and lo >= hi:
+        raise ConfigError("watch.confirm.sane_pct_min", "must be < watch.confirm.sane_pct_max")
+    if lo is not None and min_chg < lo:
+        raise ConfigError(
+            "watch.confirm.min_price_change_pct",
+            "must be >= watch.confirm.sane_pct_min",
+        )
+    if hi is not None and min_chg > hi:
+        raise ConfigError(
+            "watch.confirm.min_price_change_pct",
+            "must be <= watch.confirm.sane_pct_max",
+        )
 
 
 def load_config(config_path: Path, env_path: Path | None = None) -> AppConfig:

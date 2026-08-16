@@ -87,6 +87,21 @@ def parse_trades(
     return out
 
 
+def _sane_price_change(chg: float | None, confirm: dict[str, Any]) -> float | None:
+    if chg is None:
+        return None
+    lo = confirm.get("sane_pct_min")
+    hi = confirm.get("sane_pct_max")
+    try:
+        if lo is not None and chg < float(lo):
+            return None
+        if hi is not None and chg > float(hi):
+            return None
+    except (TypeError, ValueError):
+        return None
+    return chg
+
+
 def evaluate_trades(
     trades: list[Trade],
     *,
@@ -117,7 +132,8 @@ def evaluate_trades(
                 sellers.add(trade.sender)
         if trade.price is not None:
             last_price = trade.price
-        chg = ((last_price - baseline) / baseline * 100) if baseline else None
+        raw_chg = ((last_price - baseline) / baseline * 100) if baseline else None
+        chg = _sane_price_change(raw_chg, confirm)
         addr_ratio = (len(buyers) / len(sellers)) if sellers else None
         cnt_ratio = (buys / sells) if sells else None
         stats.buyers = len(buyers)
@@ -126,7 +142,7 @@ def evaluate_trades(
         stats.sells = sells
         stats.buyer_seller_ratio = addr_ratio
         stats.buy_sell_ratio = cnt_ratio
-        stats.price_change_pct = chg
+        stats.price_change_pct = raw_chg
         stats.max_buyers = max(stats.max_buyers, len(buyers))
         if addr_ratio is not None:
             stats.max_buyer_seller_ratio = max(
