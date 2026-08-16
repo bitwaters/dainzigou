@@ -211,6 +211,35 @@ _REQUIRED_PATHS = (
 )
 
 
+_ADMIN_PLACEHOLDERS = frozenset({"", "12345", "your_admin_id"})
+_CHANNEL_PLACEHOLDERS = frozenset({"", "-100xxx", "your_channel_id"})
+
+
+def _live_telegram_id(env_name: str, yaml_value: Any, placeholders: frozenset[str]) -> str:
+    env = os.environ.get(env_name, "").strip()
+    if env:
+        return env
+    val = str(yaml_value or "").strip()
+    if val in placeholders or "xxx" in val.lower():
+        raise ConfigError(
+            env_name,
+            f"set {env_name} in .env or a real telegram id in config.yaml",
+        )
+    return val
+
+
+def apply_telegram_env(raw: dict[str, Any]) -> None:
+    tg = raw.setdefault("telegram", {})
+    if not isinstance(tg, dict):
+        raise ConfigError("telegram", "must be a mapping")
+    tg["admin_id"] = _live_telegram_id(
+        "TELEGRAM_ADMIN_ID", tg.get("admin_id"), _ADMIN_PLACEHOLDERS
+    )
+    tg["channel_id"] = _live_telegram_id(
+        "TELEGRAM_CHANNEL_ID", tg.get("channel_id"), _CHANNEL_PLACEHOLDERS
+    )
+
+
 def load_secrets() -> Secrets:
     raw_grace = os.environ.get("STOP_GRACE_PERIOD", "").strip()
     if not raw_grace:
@@ -383,5 +412,6 @@ def load_config(config_path: Path, env_path: Path | None = None) -> AppConfig:
     loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     if not isinstance(loaded, dict):
         raise ConfigError(str(config_path), "root must be a mapping")
+    apply_telegram_env(loaded)
     validate(loaded, secrets.stop_grace_period)
     return AppConfig(raw=loaded, secrets=secrets, config_hash=config_hash(loaded))

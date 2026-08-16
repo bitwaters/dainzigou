@@ -1,5 +1,7 @@
 # Meme 币信号机 — 完整配置模板。复制为 config.yaml 后按环境修改。
-# 密钥不放本文件：COINGECKO_API_KEY、TELEGRAM_BOT_TOKEN、STOP_GRACE_PERIOD 走 .env。
+# 密钥与频道身份不放本文件，走 .env：
+#   COINGECKO_API_KEY、TELEGRAM_BOT_TOKEN、TELEGRAM_ADMIN_ID、TELEGRAM_CHANNEL_ID、STOP_GRACE_PERIOD
+# 下面 telegram.admin_id / channel_id 只是占位；启动时会被 .env 覆盖。
 # 任一过滤/安全阈值设为 null 即禁用该规则。
 
 # ── 运行时与工程参数 ─────────────────────────────
@@ -190,8 +192,8 @@ budget:
 
 # ── Telegram ────────────────────────────────────
 telegram:
-  channel_id: "-100xxx"
-  admin_id: "12345"
+  channel_id: "-100xxx"               # 占位，启动时用 TELEGRAM_CHANNEL_ID
+  admin_id: "12345"                   # 占位，启动时用 TELEGRAM_ADMIN_ID
   pending_ttl_sec: 180
   max_send_failures: 3
   send_timeout_sec: 10
