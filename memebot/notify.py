@@ -11,6 +11,7 @@ from urllib.parse import quote
 
 import httpx
 
+from memebot.goplus_client import solana_authority_open
 from memebot.store import Store
 
 log = logging.getLogger("memebot.notify")
@@ -104,9 +105,7 @@ def card_from_job(
     require_net_buy: bool,
 ) -> dict[str, Any]:
     changes = pool.price_change_usd or {}
-    mintable = bool(getattr(job.verdict, "mintable", False))
-    freezable = bool(getattr(job.verdict, "freezable", False))
-    authority = mintable or freezable
+    verdict = getattr(job, "verdict", None)
     return {
         "grade": grade,
         "network": pool.network,
@@ -124,7 +123,11 @@ def card_from_job(
         "fdv_usd": pool.fdv_usd,
         "market_cap_usd": pool.market_cap_usd,
         "created_at": now.isoformat(),
-        "authority_open": authority and pool.network == "solana",
+        "authority_open": solana_authority_open(
+            getattr(verdict, "mintable", None),
+            getattr(verdict, "freezable", None),
+            pool.network,
+        ),
     }
 
 

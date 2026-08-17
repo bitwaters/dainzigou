@@ -16,7 +16,12 @@ from memebot.cg_client import CgClient, CgSettings
 from memebot.config import AppConfig
 from memebot.events import EventBus
 from memebot.gates import evaluate
-from memebot.goplus_client import GoPlusClient, GoPlusSettings, SecurityVerdict
+from memebot.goplus_client import (
+    GoPlusClient,
+    GoPlusSettings,
+    SecurityVerdict,
+    solana_authority_open,
+)
 from memebot.grade import compute_metrics, decide, net_buy, parse_ohlcv, parse_trades
 from memebot.heartbeat import write_heartbeat
 from memebot.legs import ensure_open_leg, expire_inactive, init_high_from_close, touch_leg
@@ -467,7 +472,6 @@ class Runtime:
         weak_live = "weak" in self.store.pending_or_sent_grades(
             pool.network, pool.token_address, job.leg_id
         )
-        authority = bool(job.verdict.mintable or job.verdict.freezable)
         decision = decide(
             chg_1m=metrics.chg_1m,
             dist=metrics.dist,
@@ -475,7 +479,9 @@ class Runtime:
             m5=m5,
             net=job.net,
             require_net_buy=bool(self.cfg.get("grade.require_net_buy")),
-            authority_open=authority and pool.network == "solana",
+            authority_open=solana_authority_open(
+                job.verdict.mintable, job.verdict.freezable, pool.network
+            ),
             weak_live=weak_live,
             strong_min_1m_pct=float(self.cfg.get("grade.strong_min_1m_pct")),
             weak_min_1m_pct=float(self.cfg.get("grade.weak_min_1m_pct")),

@@ -116,36 +116,6 @@ def allocate_by_share(
     chosen: list[PoolSnapshot] = []
     for net, cap in slots.items():
         chosen.extend(groups[net][:cap])
-    # #region agent log
-    try:
-        import json as _json
-        import time as _time
-
-        with open("/Users/yang/Documents/tgbot/.cursor/debug-1ea519.log", "a", encoding="utf-8") as _f:
-            _f.write(
-                _json.dumps(
-                    {
-                        "sessionId": "1ea519",
-                        "hypothesisId": "Q",
-                        "location": "radar.py:allocate_by_share",
-                        "message": "detect quota",
-                        "data": {
-                            "max_n": max_n,
-                            "slots": slots,
-                            "before": {net: len(items) for net, items in groups.items()},
-                            "after": {
-                                net: sum(1 for row in chosen if row.network == net)
-                                for net in weights
-                            },
-                        },
-                        "timestamp": int(_time.time() * 1000),
-                    }
-                )
-                + "\n"
-            )
-    except Exception:
-        pass
-    # #endregion
     return chosen
 
 
