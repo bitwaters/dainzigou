@@ -266,7 +266,7 @@ class Runtime:
             )
             if "strong" in live:
                 return
-        gate = evaluate(pool, self.cfg.raw)
+        gate = evaluate(pool, self.cfg.raw, now=now)
         if not gate.passed:
             if gate.step:
                 self.store.incr_step(self._day(now), gate.step)

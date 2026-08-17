@@ -55,7 +55,10 @@ radar:
   min_m5_pct: 15
 
 gates:
+  min_pool_age_min: 5
   min_reserve_usd: 15000
+  min_fdv_usd: 25000
+  max_m15_vol_to_reserve: 4
   quote_tokens:
     solana:
       - "So11111111111111111111111111111111111111112"

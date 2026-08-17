@@ -92,6 +92,66 @@ def _tax(value: Any) -> float | None:
         return None
 
 
+def _tax_pct(value: Any) -> float | None:
+    """GoPlus BSC tax is a ratio: 0.02 = 2%, 1 = 100%. Values > 1 are already percent."""
+    n = _tax(value)
+    if n is None:
+        return None
+    if n <= 1:
+        return n * 100.0
+    return n
+
+
+def _optional_flag(value: Any) -> bool:
+    if value is None or value == "":
+        return False
+    return _flag(value) is True
+
+
+def _transfer_hooks(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _sol_fee_pct(item: dict[str, Any]) -> float | None:
+    fee = item.get("transfer_fee")
+    if not isinstance(fee, dict) or not fee:
+        return None
+    current = fee.get("current_fee_rate")
+    if not isinstance(current, dict):
+        return None
+    rate = _tax(current.get("fee_rate"))
+    if rate is None:
+        return None
+    return rate * 100.0
+
+
+# #region agent log
+def _dbg(hypothesis_id: str, location: str, message: str, data: dict[str, Any]) -> None:
+    try:
+        import json as _json
+
+        with open("/Users/yang/Documents/tgbot/.cursor/debug-1ea519.log", "a", encoding="utf-8") as _f:
+            _f.write(
+                _json.dumps(
+                    {
+                        "sessionId": "1ea519",
+                        "hypothesisId": hypothesis_id,
+                        "location": location,
+                        "message": message,
+                        "data": data,
+                        "timestamp": int(time.time() * 1000),
+                    },
+                    default=str,
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
+
+
+# #endregion
+
+
 def _pick_item(result: dict[str, Any], network: str, address: str) -> dict[str, Any] | None:
     item = result.get(address)
     if isinstance(item, dict):
@@ -107,25 +167,59 @@ def _pick_item(result: dict[str, Any], network: str, address: str) -> dict[str, 
     return None
 
 
-def map_solana(item: dict[str, Any]) -> SecurityVerdict:
+def map_solana(item: dict[str, Any], max_tax_pct: float) -> SecurityVerdict:
     closable = _authority_on(item.get("closable"))
     mutable = _authority_on(item.get("balance_mutable_authority"))
     default_state = item.get("default_account_state")
+    non_transfer = item.get("non_transferable")
+    if non_transfer is None or non_transfer == "":
+        non_transfer = item.get("none_transferable")
+    hooks = _transfer_hooks(item.get("transfer_hook"))
+    fee_pct = _sol_fee_pct(item)
     if closable is None or mutable is None or default_state is None or default_state == "":
-        return SecurityVerdict("reject", reason="missing_field")
-    if closable:
-        return SecurityVerdict("reject", reason="closable")
-    if mutable:
-        return SecurityVerdict("reject", reason="balance_mutable")
-    if str(default_state).strip() == "2":
-        return SecurityVerdict("reject", reason="default_frozen")
-    mintable = _authority_on(item.get("mintable"))
-    freezable = _authority_on(item.get("freezable"))
-    return SecurityVerdict(
-        "pass",
-        mintable=bool(mintable),
-        freezable=bool(freezable),
+        verdict = SecurityVerdict("reject", reason="missing_field")
+    elif closable:
+        verdict = SecurityVerdict("reject", reason="closable")
+    elif mutable:
+        verdict = SecurityVerdict("reject", reason="balance_mutable")
+    elif str(default_state).strip() == "2":
+        verdict = SecurityVerdict("reject", reason="default_frozen")
+    elif _optional_flag(non_transfer):
+        verdict = SecurityVerdict("reject", reason="non_transferable")
+    elif any(isinstance(h, dict) and h.get("address") for h in hooks):
+        verdict = SecurityVerdict("reject", reason="transfer_hook")
+    elif fee_pct is not None and fee_pct >= max_tax_pct:
+        verdict = SecurityVerdict("reject", reason="transfer_fee")
+    else:
+        mintable = _authority_on(item.get("mintable"))
+        freezable = _authority_on(item.get("freezable"))
+        verdict = SecurityVerdict(
+            "pass",
+            mintable=bool(mintable),
+            freezable=bool(freezable),
+        )
+    # #region agent log
+    _dbg(
+        "A",
+        "goplus_client.py:map_solana",
+        "solana hard fields",
+        {
+            "closable": closable,
+            "balance_mutable": mutable,
+            "default_account_state": default_state,
+            "non_transferable": item.get("non_transferable"),
+            "none_transferable": item.get("none_transferable"),
+            "transfer_hook_n": len(hooks),
+            "transfer_fee": item.get("transfer_fee"),
+            "fee_pct": fee_pct,
+            "max_tax_pct": max_tax_pct,
+            "metadata_mutable": item.get("metadata_mutable"),
+            "verdict": verdict.status,
+            "reason": verdict.reason,
+        },
     )
+    # #endregion
+    return verdict
 
 
 def map_bsc(item: dict[str, Any], max_tax_pct: float) -> SecurityVerdict:
@@ -133,30 +227,71 @@ def map_bsc(item: dict[str, Any], max_tax_pct: float) -> SecurityVerdict:
     pausable = _flag(item.get("transfer_pausable"))
     mintable = _flag(item.get("is_mintable"))
     owner_chg = _flag(item.get("owner_change_balance"))
-    buy_tax = _tax(item.get("buy_tax"))
-    sell_tax = _tax(item.get("sell_tax"))
+    buy_tax = _tax_pct(item.get("buy_tax"))
+    sell_tax = _tax_pct(item.get("sell_tax"))
     if None in (honeypot, pausable, mintable, owner_chg, buy_tax, sell_tax):
-        return SecurityVerdict("reject", reason="missing_field")
-    # GoPlus omits cannot_sell_all when the contract has no such function.
-    cannot_sell = item.get("cannot_sell_all")
-    if cannot_sell is not None and cannot_sell != "":
-        flag = _flag(cannot_sell)
-        if flag is None:
-            return SecurityVerdict("reject", reason="missing_field")
-        if flag:
-            return SecurityVerdict("reject", reason="cannot_sell_all")
-    if honeypot:
-        return SecurityVerdict("reject", reason="honeypot")
-    if pausable:
-        return SecurityVerdict("reject", reason="transfer_pausable")
-    assert buy_tax is not None and sell_tax is not None
-    if buy_tax >= max_tax_pct or sell_tax >= max_tax_pct:
-        return SecurityVerdict("reject", reason="tax")
-    if mintable:
-        return SecurityVerdict("reject", reason="mintable")
-    if owner_chg:
-        return SecurityVerdict("reject", reason="owner_change_balance")
-    return SecurityVerdict("pass")
+        verdict = SecurityVerdict("reject", reason="missing_field")
+    else:
+        # GoPlus omits cannot_sell_all / cannot_buy when the contract has no such function.
+        cannot_sell = item.get("cannot_sell_all")
+        if cannot_sell is not None and cannot_sell != "":
+            flag = _flag(cannot_sell)
+            if flag is None:
+                verdict = SecurityVerdict("reject", reason="missing_field")
+            elif flag:
+                verdict = SecurityVerdict("reject", reason="cannot_sell_all")
+            else:
+                verdict = None
+        else:
+            verdict = None
+        if verdict is None and honeypot:
+            verdict = SecurityVerdict("reject", reason="honeypot")
+        elif verdict is None and _optional_flag(item.get("cannot_buy")):
+            verdict = SecurityVerdict("reject", reason="cannot_buy")
+        elif verdict is None and pausable:
+            verdict = SecurityVerdict("reject", reason="transfer_pausable")
+        elif verdict is None:
+            assert buy_tax is not None and sell_tax is not None
+            if buy_tax >= max_tax_pct or sell_tax >= max_tax_pct:
+                verdict = SecurityVerdict("reject", reason="tax")
+            elif mintable:
+                verdict = SecurityVerdict("reject", reason="mintable")
+            elif owner_chg:
+                verdict = SecurityVerdict("reject", reason="owner_change_balance")
+            elif _optional_flag(item.get("selfdestruct")):
+                verdict = SecurityVerdict("reject", reason="selfdestruct")
+            elif _optional_flag(item.get("personal_slippage_modifiable")):
+                verdict = SecurityVerdict("reject", reason="personal_slippage")
+            else:
+                verdict = SecurityVerdict("pass")
+    # #region agent log
+    _dbg(
+        "B",
+        "goplus_client.py:map_bsc",
+        "bsc hard fields",
+        {
+            "is_honeypot": item.get("is_honeypot"),
+            "cannot_buy": item.get("cannot_buy"),
+            "cannot_sell_all": item.get("cannot_sell_all"),
+            "transfer_pausable": item.get("transfer_pausable"),
+            "buy_tax": item.get("buy_tax"),
+            "sell_tax": item.get("sell_tax"),
+            "buy_tax_num": buy_tax,
+            "sell_tax_num": sell_tax,
+            "tax_unit": "pct",
+            "max_tax_pct": max_tax_pct,
+            "is_mintable": item.get("is_mintable"),
+            "owner_change_balance": item.get("owner_change_balance"),
+            "selfdestruct": item.get("selfdestruct"),
+            "personal_slippage_modifiable": item.get("personal_slippage_modifiable"),
+            "is_blacklisted": item.get("is_blacklisted"),
+            "creator_percent": item.get("creator_percent"),
+            "verdict": verdict.status,
+            "reason": verdict.reason,
+        },
+    )
+    # #endregion
+    return verdict
 
 
 def map_address(
@@ -172,7 +307,7 @@ def map_address(
     if item is None:
         return SecurityVerdict("reject", reason="not_in_result")
     if network == "solana":
-        return map_solana(item)
+        return map_solana(item, max_tax_pct)
     return map_bsc(item, max_tax_pct)
 
 
@@ -364,4 +499,19 @@ class GoPlusClient:
                 verdict = map_address(network, addr, payload, self.settings.max_tax_pct)
                 self._remember(network, addr, verdict)
                 out[addr] = verdict
+                # #region agent log
+                item = _pick_item(payload.get("result") or {}, network, addr)
+                _dbg(
+                    "D",
+                    "goplus_client.py:check_many",
+                    "mapped live address",
+                    {
+                        "network": network,
+                        "addr_tail": addr[-8:] if isinstance(addr, str) and len(addr) >= 8 else addr,
+                        "verdict": verdict.status,
+                        "reason": verdict.reason,
+                        "keys": sorted(item.keys()) if isinstance(item, dict) else [],
+                    },
+                )
+                # #endregion
         return out

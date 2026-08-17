@@ -53,7 +53,10 @@ _REQUIRED_PATHS = (
     "streams.trending_1h.interval_sec",
     "streams.trending_1h.pages",
     "radar.min_m5_pct",
+    "gates.min_pool_age_min",
     "gates.min_reserve_usd",
+    "gates.min_fdv_usd",
+    "gates.max_m15_vol_to_reserve",
     "gates.quote_tokens",
     "security.cache_ttl_min",
     "security.transient_ttl_sec",
@@ -305,6 +308,16 @@ def validate(raw: dict[str, Any], *, stop_grace_period: float = DEPLOY_STOP_GRAC
             "radar.min_m5_pct",
             "must be >= streams.momentum.prefilter.price_change_percentage_min",
         )
+
+    min_age = _optional_number(raw, "gates.min_pool_age_min")
+    if min_age is not None and min_age < 0:
+        raise ConfigError("gates.min_pool_age_min", "must be >= 0")
+    min_fdv = _optional_number(raw, "gates.min_fdv_usd")
+    if min_fdv is not None and min_fdv < 0:
+        raise ConfigError("gates.min_fdv_usd", "must be >= 0")
+    max_turn = _optional_number(raw, "gates.max_m15_vol_to_reserve")
+    if max_turn is not None and max_turn <= 0:
+        raise ConfigError("gates.max_m15_vol_to_reserve", "must be > 0")
 
     transient = _as_number(
         "security.transient_ttl_sec", _need(raw, "security.transient_ttl_sec")
