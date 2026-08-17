@@ -64,9 +64,13 @@ _REQUIRED_PATHS = (
     "gates.deny_dexes",
     "gates.min_m15_buyers",
     "gates.max_m15_buys_per_buyer",
+    "gates.max_m15_buy_sell_ratio",
     "security.cache_ttl_min",
     "security.transient_ttl_sec",
     "security.max_tax_pct",
+    "security.min_lp_locked_pct",
+    "security.max_top_holder_pct",
+    "security.max_top10_holder_pct",
     "security.timeout_sec",
     "security.batch_size",
     "grade.ohlcv_limit",
@@ -82,6 +86,7 @@ _REQUIRED_PATHS = (
     "grade.require_net_buy",
     "grade.min_window_makers",
     "grade.max_window_trades_per_maker",
+    "grade.max_window_buy_sell_ratio",
     "legs.end_drawdown_pct",
     "legs.max_inactive_h",
     "legs.reopen_cooldown_min",
@@ -291,9 +296,7 @@ def validate(raw: dict[str, Any], *, stop_grace_period: float = DEPLOY_STOP_GRAC
     if strong_1m < weak_1m:
         raise ConfigError("grade.strong_min_1m_pct", "must be >= grade.weak_min_1m_pct")
 
-    strong_dist = _as_number(
-        "grade.strong_max_dist_pct", _need(raw, "grade.strong_max_dist_pct")
-    )
+    strong_dist = _as_number("grade.strong_max_dist_pct", _need(raw, "grade.strong_max_dist_pct"))
     weak_dist = _as_number("grade.weak_max_dist_pct", _need(raw, "grade.weak_max_dist_pct"))
     if strong_dist > weak_dist:
         raise ConfigError("grade.strong_max_dist_pct", "must be <= grade.weak_max_dist_pct")
@@ -315,9 +318,7 @@ def validate(raw: dict[str, Any], *, stop_grace_period: float = DEPLOY_STOP_GRAC
     require_net = _need(raw, "grade.require_net_buy")
     if not isinstance(require_net, bool):
         raise ConfigError("grade.require_net_buy", "must be a boolean")
-    min_makers = _as_number(
-        "grade.min_window_makers", _need(raw, "grade.min_window_makers")
-    )
+    min_makers = _as_number("grade.min_window_makers", _need(raw, "grade.min_window_makers"))
     if min_makers < 0:
         raise ConfigError("grade.min_window_makers", "must be >= 0")
     max_maker_n = _as_number(
@@ -326,6 +327,9 @@ def validate(raw: dict[str, Any], *, stop_grace_period: float = DEPLOY_STOP_GRAC
     )
     if max_maker_n < 0:
         raise ConfigError("grade.max_window_trades_per_maker", "must be >= 0")
+    max_bs = _optional_number(raw, "grade.max_window_buy_sell_ratio")
+    if max_bs is not None and max_bs <= 1:
+        raise ConfigError("grade.max_window_buy_sell_ratio", "must be > 1")
 
     min_m5 = _optional_number(raw, "radar.min_m5_pct")
     pre_m5 = _as_number(
@@ -338,9 +342,7 @@ def validate(raw: dict[str, Any], *, stop_grace_period: float = DEPLOY_STOP_GRAC
             "must be >= streams.momentum.prefilter.price_change_percentage_min",
         )
 
-    max_detect = _as_number(
-        "radar.max_detect_per_round", _need(raw, "radar.max_detect_per_round")
-    )
+    max_detect = _as_number("radar.max_detect_per_round", _need(raw, "radar.max_detect_per_round"))
     if max_detect <= 0:
         raise ConfigError("radar.max_detect_per_round", "must be > 0")
     share = _need(raw, "radar.chain_share")
@@ -377,15 +379,30 @@ def validate(raw: dict[str, Any], *, stop_grace_period: float = DEPLOY_STOP_GRAC
     max_per = _optional_number(raw, "gates.max_m15_buys_per_buyer")
     if max_per is not None and max_per <= 0:
         raise ConfigError("gates.max_m15_buys_per_buyer", "must be > 0")
+    max_bs = _optional_number(raw, "gates.max_m15_buy_sell_ratio")
+    if max_bs is not None and max_bs <= 1:
+        raise ConfigError("gates.max_m15_buy_sell_ratio", "must be > 1")
 
-    transient = _as_number(
-        "security.transient_ttl_sec", _need(raw, "security.transient_ttl_sec")
-    )
+    transient = _as_number("security.transient_ttl_sec", _need(raw, "security.transient_ttl_sec"))
     cache_min = _as_number("security.cache_ttl_min", _need(raw, "security.cache_ttl_min"))
     if transient >= cache_min * 60:
         raise ConfigError(
             "security.transient_ttl_sec",
             "must be < security.cache_ttl_min × 60",
+        )
+    min_lp = _optional_number(raw, "security.min_lp_locked_pct")
+    if min_lp is not None and (min_lp < 0 or min_lp > 100):
+        raise ConfigError("security.min_lp_locked_pct", "must be 0-100")
+    max_top = _optional_number(raw, "security.max_top_holder_pct")
+    if max_top is not None and (max_top <= 0 or max_top > 100):
+        raise ConfigError("security.max_top_holder_pct", "must be > 0 and <= 100")
+    max_top10 = _optional_number(raw, "security.max_top10_holder_pct")
+    if max_top10 is not None and (max_top10 <= 0 or max_top10 > 100):
+        raise ConfigError("security.max_top10_holder_pct", "must be > 0 and <= 100")
+    if max_top is not None and max_top10 is not None and max_top10 < max_top:
+        raise ConfigError(
+            "security.max_top10_holder_pct",
+            "must be >= security.max_top_holder_pct",
         )
 
     grace = _as_number("runtime.shutdown.grace_sec", _need(raw, "runtime.shutdown.grace_sec"))
@@ -398,9 +415,7 @@ def validate(raw: dict[str, Any], *, stop_grace_period: float = DEPLOY_STOP_GRAC
     inactive = _as_number("legs.max_inactive_h", _need(raw, "legs.max_inactive_h"))
     if inactive <= 0:
         raise ConfigError("legs.max_inactive_h", "must be > 0")
-    cooldown = _as_number(
-        "legs.reopen_cooldown_min", _need(raw, "legs.reopen_cooldown_min")
-    )
+    cooldown = _as_number("legs.reopen_cooldown_min", _need(raw, "legs.reopen_cooldown_min"))
     if cooldown < 0:
         raise ConfigError("legs.reopen_cooldown_min", "must be >= 0")
 

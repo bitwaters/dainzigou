@@ -496,6 +496,15 @@ class Runtime:
                     if max_per > 0 and per > max_per:
                         self.store.incr_step(self._day(now), "trade_wash")
                         continue
+                max_bs = float(self.cfg.get("grade.max_window_buy_sell_ratio") or 0)
+                if max_bs > 1:
+                    if sell <= 0:
+                        if buy > 0:
+                            self.store.incr_step(self._day(now), "trade_imbalance")
+                            continue
+                    elif buy / sell > max_bs:
+                        self.store.incr_step(self._day(now), "trade_imbalance")
+                        continue
                 job.buy_usd, job.sell_usd, job.net = buy, sell, net
                 job.trades_ok = True
 

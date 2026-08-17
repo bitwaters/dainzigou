@@ -129,4 +129,19 @@ def evaluate(
         if max_per is not None and buys / buyers > float(max_per):
             return GateDecision(False, "gate_wash")
 
+    max_bs = gates.get("max_m15_buy_sell_ratio")
+    if max_bs is not None:
+        win = _tx_window(pool, "m15")
+        if not win:
+            win = _tx_window(pool, "m5")
+        buys = win.get("buys")
+        sells = win.get("sells")
+        if buys is None or sells is None:
+            return GateDecision(False, "gate_bs_ratio")
+        if sells <= 0:
+            if buys > 0:
+                return GateDecision(False, "gate_bs_ratio")
+        elif buys / sells > float(max_bs):
+            return GateDecision(False, "gate_bs_ratio")
+
     return GateDecision(True, None)
