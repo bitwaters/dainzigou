@@ -17,6 +17,7 @@ log = logging.getLogger("memebot.notify")
 _ZW = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060-\u206f]")
 _CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _CHAIN_LABEL = {"solana": "SOL", "bsc": "BSC"}
+_CHAIN_MARK = {"solana": "🟣 SOL", "bsc": "🟡 BSC"}
 _GMGN_CHAIN = {"solana": "sol", "bsc": "bsc"}
 _DBOT_CHAIN = {"solana": "solana", "bsc": "bsc"}
 _PCT_ABS_MAX = 9999.0
@@ -133,7 +134,7 @@ def render_card(payload: dict[str, Any], raw: dict[str, Any]) -> tuple[str, dict
     name = sanitize_chain_text(str(payload.get("name") or ""), max_len)
     grade = str(payload.get("grade") or "")
     network = str(payload.get("network") or "")
-    chain = html.escape(_CHAIN_LABEL.get(network, network.upper() or "?"))
+    chain = html.escape(_CHAIN_MARK.get(network, _CHAIN_LABEL.get(network, network.upper() or "?")))
     ca = html.escape(str(payload.get("token_address") or ""), quote=True)
     chg = fmt_pct(payload.get("chg_1m")) or "—"
     m5 = fmt_pct(payload.get("m5")) or "—"
@@ -142,10 +143,9 @@ def render_card(payload: dict[str, Any], raw: dict[str, Any]) -> tuple[str, dict
     liq = fmt_usd(payload.get("reserve_usd")) or "—"
     mc = fmt_usd(display_mcap(payload.get("market_cap_usd"), payload.get("fdv_usd"))) or "—"
     mark = "🔥 强" if grade == "strong" else "⚡️ 弱"
-    head = f"<b>{mark}  ${symbol}</b>"
+    head = f"<b>{chain}</b>  {mark}  <b>${symbol}</b>"
     if name and name != symbol:
         head += f"  {name}"
-    head += f"  {chain}"
     if payload.get("hide_net_buy"):
         buy, sell = "—", "—"
     else:
@@ -160,9 +160,9 @@ def render_card(payload: dict[str, Any], raw: dict[str, Any]) -> tuple[str, dict
     lines = [
         head,
         f"<code>{ca}</code>",
+        f"💧 流动性 {liq}  💰 市值 {mc}",
         f"📈 1m <b>{chg}</b>  5m {m5}  1h {h1}  距高 {dist}",
         f"🟢 买 {buy}  🔴 卖 {sell}",
-        f"💧 流动性 {liq}  💰 市值 {mc}",
         f"🛡 {security}",
     ]
     token_q = quote(str(payload.get("token_address") or ""), safe="")
