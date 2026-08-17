@@ -166,12 +166,22 @@ async def fetch_stream(
             client.trending_pools(duration=duration, page=page, include="base_token")
             for page in range(1, pages + 1)
         ]
-    payloads = await asyncio.gather(*coros)
+    payloads = await asyncio.gather(*coros, return_exceptions=True)
     rows: list[PoolSnapshot] = []
+    errors: list[BaseException] = []
     for payload in payloads:
+        if isinstance(payload, BaseException):
+            log.warning("stream %s page failed: %s", name, payload)
+            errors.append(payload)
+            continue
         if not isinstance(payload, dict):
-            raise ValueError(f"{name}: expected object payload")
+            err = ValueError(f"{name}: expected object payload")
+            log.warning("%s", err)
+            errors.append(err)
+            continue
         rows.extend(parse_pools(payload, name))
+    if errors and len(errors) == len(payloads):
+        raise errors[0]
     return rows
 
 

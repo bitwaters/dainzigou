@@ -12,7 +12,7 @@ def as_dict(value: Any) -> dict[str, Any]:
 
 
 def _f(value: Any) -> float | None:
-    if value is None or value == "":
+    if value is None or value == "" or isinstance(value, bool):
         return None
     try:
         return float(value)
@@ -127,9 +127,9 @@ def parse_pools(payload: dict[str, Any], source: str) -> list[PoolSnapshot]:
             if not isinstance(node, dict):
                 continue
             tx[win] = {
-                k: float(v)
+                k: n
                 for k, v in node.items()
-                if isinstance(v, (int, float)) or (isinstance(v, str) and v != "")
+                if (n := _f(v)) is not None
             }
         changes = {k: _f(v) for k, v in ch_raw.items()}
         native_raw = as_dict(attrs.get("price_change_percentage_native"))

@@ -28,7 +28,7 @@ class Budget:
         self.store = store
         self.cg_daily_call_cap = cg_daily_call_cap
         self._alert = alert
-        self._cap_alerted = False
+        self._cap_alerted_day: str | None = None
 
     def today_utc(self) -> str:
         return datetime.now(UTC).date().isoformat()
@@ -45,21 +45,21 @@ class Budget:
             return self.store.add_credits(day, kind, calls=1)
         used = self.store.cg_calls_today(day)
         if used >= self.cg_daily_call_cap:
-            self._fire_cap(used)
+            self._fire_cap(used, day)
             raise BudgetExhausted(
                 f"cg_daily_call_cap reached ({used}/{self.cg_daily_call_cap})"
             )
         total = self.store.add_credits(day, kind, calls=1)
         if self.store.cg_calls_today(day) >= self.cg_daily_call_cap:
-            self._fire_cap(self.store.cg_calls_today(day))
+            self._fire_cap(self.store.cg_calls_today(day), day)
         return total
 
-    def _fire_cap(self, used: int) -> None:
+    def _fire_cap(self, used: int, day: str) -> None:
         msg = (
             f"emergency: CoinGecko daily cap reached "
             f"({used}/{self.cg_daily_call_cap}); collection stopped"
         )
         log.error(msg)
-        if not self._cap_alerted and self._alert is not None:
+        if self._cap_alerted_day != day and self._alert is not None:
             self._alert(msg)
-            self._cap_alerted = True
+            self._cap_alerted_day = day

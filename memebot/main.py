@@ -22,6 +22,8 @@ def setup_logging(level: str) -> None:
         stream=sys.stdout,
         force=True,
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 async def _run(cfg: AppConfig, store: Store) -> None:
@@ -38,6 +40,7 @@ async def _run(cfg: AppConfig, store: Store) -> None:
     try:
         await runtime.run()
     finally:
+        await runtime.aclose()
         await asyncio.wait_for(store.close(), timeout=grace)
 
 

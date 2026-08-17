@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import re
@@ -204,7 +205,7 @@ class Notifier:
             timeout=timeout,
             transport=transport,
         )
-        self._sleep = sleep
+        self._sleep = sleep if sleep is not None else asyncio.sleep
         self.last_chat_id: str | None = None
 
     async def aclose(self) -> None:
@@ -281,18 +282,15 @@ class Notifier:
                 )
             except httpx.RequestError:
                 last_status = 0
-                if self._sleep:
-                    await self._sleep(float(retry["backoff_base_sec"]))
+                await self._sleep(float(retry["backoff_base_sec"]))
                 continue
             last_status = resp.status_code
             if resp.status_code == 429:
                 wait = float(resp.headers.get("retry-after") or retry["backoff_base_sec"])
-                if self._sleep:
-                    await self._sleep(wait)
+                await self._sleep(wait)
                 continue
             if 500 <= resp.status_code <= 599:
-                if self._sleep:
-                    await self._sleep(float(retry["backoff_base_sec"]))
+                await self._sleep(float(retry["backoff_base_sec"]))
                 continue
             if 400 <= resp.status_code <= 499:
                 self.store.update_signal_status(signal_id, "failed_perm", add_fails=i + 1)

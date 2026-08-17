@@ -132,6 +132,13 @@ class Runtime:
         self.radar = Radar(self.client, self.store, self.cfg.raw)
         self.tracker = Tracker(self.store, self.cfg.raw, self.client)
 
+    async def aclose(self) -> None:
+        for obj in (self.client, self.goplus, self.notifier):
+            close = getattr(obj, "aclose", None)
+            if close is None:
+                continue
+            await close()
+
     def request_stop(self) -> None:
         self._stop.set()
 
@@ -482,12 +489,13 @@ class Runtime:
                 )
                 min_makers = float(self.cfg.get("grade.min_window_makers") or 0)
                 max_per = float(self.cfg.get("grade.max_window_trades_per_maker") or 0)
-                if min_makers > 0 and unique < min_makers:
-                    self.store.incr_step(self._day(now), "trade_wash")
-                    continue
-                if max_per > 0 and per > max_per:
-                    self.store.incr_step(self._day(now), "trade_wash")
-                    continue
+                if unique > 0:
+                    if min_makers > 0 and unique < min_makers:
+                        self.store.incr_step(self._day(now), "trade_wash")
+                        continue
+                    if max_per > 0 and per > max_per:
+                        self.store.incr_step(self._day(now), "trade_wash")
+                        continue
                 job.buy_usd, job.sell_usd, job.net = buy, sell, net
                 job.trades_ok = True
 

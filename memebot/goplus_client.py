@@ -244,6 +244,8 @@ def map_address(
     payload: dict[str, Any],
     max_tax_pct: float,
 ) -> SecurityVerdict:
+    if network not in ENDPOINTS:
+        return SecurityVerdict("reject", reason="unknown_network")
     result = payload.get("result")
     if not isinstance(result, dict):
         return SecurityVerdict("reject", reason="not_in_result")
@@ -374,7 +376,10 @@ class GoPlusClient:
         token = await self._ensure_token()
         if token is None:
             return None
-        path = ENDPOINTS[network]
+        path = ENDPOINTS.get(network)
+        if path is None:
+            log.warning("goplus unknown network %s", network)
+            return None
         if self._record_credit is not None:
             self._record_credit()
         headers = {"Authorization": authorization_header(token)}
@@ -428,6 +433,12 @@ class GoPlusClient:
             else:
                 need.append(addr)
         if not need:
+            return out
+        if network not in ENDPOINTS:
+            for addr in need:
+                verdict = SecurityVerdict("reject", reason="unknown_network")
+                self._remember(network, addr, verdict)
+                out[addr] = verdict
             return out
         size = max(1, self.settings.batch_size)
         for i in range(0, len(need), size):

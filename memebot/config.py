@@ -15,6 +15,7 @@ import yaml
 _B58 = frozenset("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
 _EVM = re.compile(r"^0x[0-9a-fA-F]{40}$")
 _LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR"})
+_ALLOWED_NETWORKS = frozenset({"solana", "bsc"})
 DEPLOY_STOP_GRACE_SEC = 35.0
 
 _REQUIRED_PATHS = (
@@ -273,6 +274,15 @@ def validate(raw: dict[str, Any], *, stop_grace_period: float = DEPLOY_STOP_GRAC
     networks = _need(raw, "networks")
     if not isinstance(networks, list) or not networks:
         raise ConfigError("networks", "must be a non-empty list")
+    seen: set[str] = set()
+    for i, net in enumerate(networks):
+        if not isinstance(net, str) or not net:
+            raise ConfigError("networks", "must be a non-empty list of strings")
+        if net not in _ALLOWED_NETWORKS:
+            raise ConfigError(f"networks[{i}]", "must be solana or bsc")
+        if net in seen:
+            raise ConfigError("networks", "must not contain duplicates")
+        seen.add(net)
 
     _validate_quote_tokens(raw)
 
