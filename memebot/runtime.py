@@ -22,7 +22,7 @@ from memebot.heartbeat import write_heartbeat
 from memebot.legs import ensure_open_leg, expire_inactive, init_high_from_close, touch_leg
 from memebot.notify import Notifier
 from memebot.pool import PoolSnapshot
-from memebot.radar import Radar
+from memebot.radar import Radar, allocate_by_share
 from memebot.store import Store, cleanup_config_from_raw
 from memebot.tracker import Tracker
 
@@ -376,6 +376,17 @@ class Runtime:
         ready: list[tuple[PoolSnapshot, SecurityVerdict]] = []
         for pool in rows:
             self._judge_row(pool, now, need_security, ready)
+
+        candidates = list(need_security) + [pool for pool, _verdict in ready]
+        share = self.cfg.raw["radar"]["chain_share"]
+        max_n = int(self.cfg.get("radar.max_detect_per_round"))
+        chosen = allocate_by_share(candidates, share, max_n)
+        chosen_ids = {id(pool) for pool in chosen}
+        skipped = len(candidates) - len(chosen)
+        if skipped:
+            self.store.incr_step(self._day(now), "detect_quota", skipped)
+        need_security = [pool for pool in need_security if id(pool) in chosen_ids]
+        ready = [(pool, verdict) for pool, verdict in ready if id(pool) in chosen_ids]
 
         jobs: list[GradeJob] = []
         for pool, verdict in ready:

@@ -53,6 +53,8 @@ _REQUIRED_PATHS = (
     "streams.trending_1h.interval_sec",
     "streams.trending_1h.pages",
     "radar.min_m5_pct",
+    "radar.max_detect_per_round",
+    "radar.chain_share",
     "gates.min_pool_age_min",
     "gates.min_reserve_usd",
     "gates.min_fdv_usd",
@@ -308,6 +310,27 @@ def validate(raw: dict[str, Any], *, stop_grace_period: float = DEPLOY_STOP_GRAC
             "radar.min_m5_pct",
             "must be >= streams.momentum.prefilter.price_change_percentage_min",
         )
+
+    max_detect = _as_number(
+        "radar.max_detect_per_round", _need(raw, "radar.max_detect_per_round")
+    )
+    if max_detect <= 0:
+        raise ConfigError("radar.max_detect_per_round", "must be > 0")
+    share = _need(raw, "radar.chain_share")
+    if not isinstance(share, dict) or not share:
+        raise ConfigError("radar.chain_share", "must be a non-empty object")
+    nets = {str(n) for n in (_need(raw, "networks") or [])}
+    keys = {str(k) for k in share}
+    if keys != nets:
+        raise ConfigError("radar.chain_share", "keys must match networks")
+    weights: list[float] = []
+    for key, value in share.items():
+        weight = _as_number(f"radar.chain_share.{key}", value)
+        if weight <= 0:
+            raise ConfigError(f"radar.chain_share.{key}", "must be > 0")
+        weights.append(weight)
+    if abs(sum(weights) - 1.0) > 1e-9:
+        raise ConfigError("radar.chain_share", "values must sum to 1")
 
     min_age = _optional_number(raw, "gates.min_pool_age_min")
     if min_age is not None and min_age < 0:

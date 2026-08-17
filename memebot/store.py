@@ -37,6 +37,7 @@ STEP_NAMES = frozenset(
         "gate_fdv",
         "gate_turnover",
         "gate_m5",
+        "detect_quota",
         "security_reject",
         "security_transient",
         "grade_input",

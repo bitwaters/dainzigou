@@ -81,6 +81,74 @@ def filter_stream_rows(
     return [row for row in rows if row.network in networks]
 
 
+def _m5(row: PoolSnapshot) -> float:
+    changes = row.price_change_usd or {}
+    value = changes.get("m5")
+    return float(value) if value is not None else float("-inf")
+
+
+def allocate_by_share(
+    rows: list[PoolSnapshot],
+    share: Mapping[str, float],
+    max_n: int,
+) -> list[PoolSnapshot]:
+    """Keep top-m5 rows per chain so slots follow share; unused slots stay empty."""
+    if max_n <= 0 or not rows:
+        return []
+    weights = {str(k): float(v) for k, v in share.items() if float(v) > 0}
+    total_w = sum(weights.values())
+    if total_w <= 0:
+        return []
+    groups: dict[str, list[PoolSnapshot]] = {net: [] for net in weights}
+    for row in rows:
+        if row.network in groups:
+            groups[row.network].append(row)
+    for net in groups:
+        groups[net].sort(key=_m5, reverse=True)
+    raw_slots = {net: weights[net] / total_w * max_n for net in weights}
+    slots = {net: int(raw_slots[net]) for net in weights}
+    remain = max_n - sum(slots.values())
+    for net in sorted(weights, key=lambda n: raw_slots[n] - slots[n], reverse=True):
+        if remain <= 0:
+            break
+        slots[net] += 1
+        remain -= 1
+    chosen: list[PoolSnapshot] = []
+    for net, cap in slots.items():
+        chosen.extend(groups[net][:cap])
+    # #region agent log
+    try:
+        import json as _json
+        import time as _time
+
+        with open("/Users/yang/Documents/tgbot/.cursor/debug-1ea519.log", "a", encoding="utf-8") as _f:
+            _f.write(
+                _json.dumps(
+                    {
+                        "sessionId": "1ea519",
+                        "hypothesisId": "Q",
+                        "location": "radar.py:allocate_by_share",
+                        "message": "detect quota",
+                        "data": {
+                            "max_n": max_n,
+                            "slots": slots,
+                            "before": {net: len(items) for net, items in groups.items()},
+                            "after": {
+                                net: sum(1 for row in chosen if row.network == net)
+                                for net in weights
+                            },
+                        },
+                        "timestamp": int(_time.time() * 1000),
+                    }
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
+    # #endregion
+    return chosen
+
+
 def dedup_rows(rows: list[PoolSnapshot]) -> list[PoolSnapshot]:
     best: dict[tuple[str, str], PoolSnapshot] = {}
     for row in rows:
@@ -110,7 +178,7 @@ async def fetch_stream(
         }
         coros = [
             client.megafilter(
-                networks=list(raw["networks"]),
+                networks=[str(network)],
                 pool_created_hour_min=float(pre["pool_created_hour_min"]),
                 pool_created_hour_max=float(pre["pool_created_hour_max"]),
                 reserve_in_usd_min=float(pre["reserve_in_usd_min"]),
@@ -119,6 +187,7 @@ async def fetch_stream(
                 include="base_token",
                 extra_params=extra,
             )
+            for network in raw["networks"]
             for page in range(1, pages + 1)
         ]
     else:

@@ -53,6 +53,10 @@ streams:
 
 radar:
   min_m5_pct: 15
+  max_detect_per_round: 30
+  chain_share:
+    solana: 0.6
+    bsc: 0.4
 
 gates:
   min_pool_age_min: 5
