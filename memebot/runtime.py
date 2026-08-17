@@ -22,7 +22,7 @@ from memebot.goplus_client import (
     SecurityVerdict,
     solana_authority_open,
 )
-from memebot.grade import compute_metrics, decide, net_buy, parse_ohlcv, parse_trades
+from memebot.grade import compute_metrics, decide, maker_stats, net_buy, parse_ohlcv, parse_trades
 from memebot.heartbeat import write_heartbeat
 from memebot.legs import ensure_open_leg, expire_inactive, init_high_from_close, touch_leg
 from memebot.notify import Notifier
@@ -469,6 +469,19 @@ class Runtime:
                     float(self.cfg.get("grade.trade_lookback_sec")),
                     float(self.cfg.get("grade.min_trade_usd")),
                 )
+                unique, per = maker_stats(
+                    parsed,
+                    int(now.timestamp()),
+                    float(self.cfg.get("grade.trade_lookback_sec")),
+                )
+                min_makers = float(self.cfg.get("grade.min_window_makers") or 0)
+                max_per = float(self.cfg.get("grade.max_window_trades_per_maker") or 0)
+                if min_makers > 0 and unique < min_makers:
+                    self.store.incr_step(self._day(now), "trade_wash")
+                    continue
+                if max_per > 0 and per > max_per:
+                    self.store.incr_step(self._day(now), "trade_wash")
+                    continue
                 job.buy_usd, job.sell_usd, job.net = buy, sell, net
                 job.trades_ok = True
 

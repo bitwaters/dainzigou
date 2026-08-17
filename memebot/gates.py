@@ -37,6 +37,11 @@ def _window_volume(pool: PoolSnapshot) -> float | None:
     return None
 
 
+def _tx_window(pool: PoolSnapshot, key: str) -> dict[str, float]:
+    node = (pool.tx or {}).get(key)
+    return node if isinstance(node, dict) else {}
+
+
 def evaluate(
     pool: PoolSnapshot,
     raw: Mapping[str, Any],
@@ -60,6 +65,13 @@ def evaluate(
         }
         if needle not in haystack:
             return GateDecision(False, "gate_quote")
+
+    denied = (raw.get("gates") or {}).get("deny_dexes")
+    if denied:
+        names = {str(x).strip().lower() for x in denied if x}
+        dex = (pool.dex or "").strip().lower()
+        if dex and dex in names:
+            return GateDecision(False, "gate_dex")
 
     gates = raw.get("gates") or {}
     min_age = gates.get("min_pool_age_min")
@@ -99,5 +111,22 @@ def evaluate(
         m5 = changes.get("m5")
         if m5 is None or m5 < float(min_m5):
             return GateDecision(False, "gate_m5")
+
+    min_buyers = gates.get("min_m15_buyers")
+    max_per = gates.get("max_m15_buys_per_buyer")
+    if min_buyers is not None or max_per is not None:
+        win = _tx_window(pool, "m15")
+        if not win:
+            win = _tx_window(pool, "m5")
+        buyers = win.get("buyers")
+        buys = win.get("buys")
+        if buyers is None or buys is None:
+            return GateDecision(False, "gate_buyers")
+        if min_buyers is not None and buyers < float(min_buyers):
+            return GateDecision(False, "gate_buyers")
+        if max_per is not None and buyers <= 0:
+            return GateDecision(False, "gate_wash")
+        if max_per is not None and buys / buyers > float(max_per):
+            return GateDecision(False, "gate_wash")
 
     return GateDecision(True, None)

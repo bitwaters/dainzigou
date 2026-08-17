@@ -24,6 +24,7 @@ class Trade:
     ts: int
     kind: str
     usd: float
+    maker: str = ""
 
 
 @dataclass(frozen=True)
@@ -100,7 +101,14 @@ def parse_trades(payload: dict[str, Any] | None) -> list[Trade] | None:
             usd = float(attrs.get("volume_in_usd") or attrs.get("price_usd_volume") or 0)
         except (TypeError, ValueError):
             continue
-        out.append(Trade(ts=ts, kind=str(kind), usd=usd))
+        out.append(
+            Trade(
+                ts=ts,
+                kind=str(kind),
+                usd=usd,
+                maker=str(attrs.get("tx_from_address") or ""),
+            )
+        )
     return out
 
 
@@ -158,6 +166,25 @@ def net_buy(
         elif trade.kind == "sell":
             sell += trade.usd
     return buy, sell, buy - sell
+
+
+def maker_stats(
+    trades: list[Trade],
+    now_ts: int,
+    lookback_sec: float,
+) -> tuple[int, int]:
+    cutoff = now_ts - lookback_sec
+    counts: dict[str, int] = {}
+    for trade in trades:
+        if trade.ts <= cutoff or trade.ts > now_ts:
+            continue
+        maker = trade.maker.strip()
+        if not maker:
+            continue
+        counts[maker] = counts.get(maker, 0) + 1
+    if not counts:
+        return 0, 0
+    return len(counts), max(counts.values())
 
 
 def decide(

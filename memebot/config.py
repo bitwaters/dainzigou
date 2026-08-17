@@ -60,6 +60,9 @@ _REQUIRED_PATHS = (
     "gates.min_fdv_usd",
     "gates.max_m15_vol_to_reserve",
     "gates.quote_tokens",
+    "gates.deny_dexes",
+    "gates.min_m15_buyers",
+    "gates.max_m15_buys_per_buyer",
     "security.cache_ttl_min",
     "security.transient_ttl_sec",
     "security.max_tax_pct",
@@ -76,6 +79,8 @@ _REQUIRED_PATHS = (
     "grade.trade_lookback_sec",
     "grade.min_trade_usd",
     "grade.require_net_buy",
+    "grade.min_window_makers",
+    "grade.max_window_trades_per_maker",
     "legs.end_drawdown_pct",
     "legs.max_inactive_h",
     "legs.reopen_cooldown_min",
@@ -300,6 +305,17 @@ def validate(raw: dict[str, Any], *, stop_grace_period: float = DEPLOY_STOP_GRAC
     require_net = _need(raw, "grade.require_net_buy")
     if not isinstance(require_net, bool):
         raise ConfigError("grade.require_net_buy", "must be a boolean")
+    min_makers = _as_number(
+        "grade.min_window_makers", _need(raw, "grade.min_window_makers")
+    )
+    if min_makers < 0:
+        raise ConfigError("grade.min_window_makers", "must be >= 0")
+    max_maker_n = _as_number(
+        "grade.max_window_trades_per_maker",
+        _need(raw, "grade.max_window_trades_per_maker"),
+    )
+    if max_maker_n < 0:
+        raise ConfigError("grade.max_window_trades_per_maker", "must be >= 0")
 
     min_m5 = _optional_number(raw, "radar.min_m5_pct")
     pre_m5 = _as_number(
@@ -342,6 +358,15 @@ def validate(raw: dict[str, Any], *, stop_grace_period: float = DEPLOY_STOP_GRAC
     max_turn = _optional_number(raw, "gates.max_m15_vol_to_reserve")
     if max_turn is not None and max_turn <= 0:
         raise ConfigError("gates.max_m15_vol_to_reserve", "must be > 0")
+    deny = _need(raw, "gates.deny_dexes")
+    if not isinstance(deny, list) or not all(isinstance(x, str) and x.strip() for x in deny):
+        raise ConfigError("gates.deny_dexes", "must be a list of non-empty strings")
+    min_buyers = _optional_number(raw, "gates.min_m15_buyers")
+    if min_buyers is not None and min_buyers < 1:
+        raise ConfigError("gates.min_m15_buyers", "must be >= 1")
+    max_per = _optional_number(raw, "gates.max_m15_buys_per_buyer")
+    if max_per is not None and max_per <= 0:
+        raise ConfigError("gates.max_m15_buys_per_buyer", "must be > 0")
 
     transient = _as_number(
         "security.transient_ttl_sec", _need(raw, "security.transient_ttl_sec")

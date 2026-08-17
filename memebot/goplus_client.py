@@ -221,6 +221,11 @@ def map_bsc(item: dict[str, Any], max_tax_pct: float) -> SecurityVerdict:
         return SecurityVerdict("reject", reason="selfdestruct")
     if _optional_flag(item.get("personal_slippage_modifiable")):
         return SecurityVerdict("reject", reason="personal_slippage")
+    launch = item.get("launchpad_token")
+    if isinstance(launch, dict) and str(launch.get("is_launchpad_token")).strip() == "1":
+        name = str(launch.get("launchpad_name") or "").lower().replace("_", "-")
+        if name in {"four.meme", "fourmeme", "four-meme"}:
+            return SecurityVerdict("reject", reason="launchpad")
     return SecurityVerdict("pass")
 
 

@@ -63,6 +63,12 @@ gates:
   min_reserve_usd: 15000
   min_fdv_usd: 25000
   max_m15_vol_to_reserve: 4
+  deny_dexes:
+    - pump-fun
+    - four-meme
+    - meteora-dbc
+  min_m15_buyers: 15
+  max_m15_buys_per_buyer: 6
   quote_tokens:
     solana:
       - "So11111111111111111111111111111111111111112"
@@ -82,8 +88,8 @@ security:
 grade:
   ohlcv_limit: 30
   near_high_bars: 5
-  weak_min_1m_pct: 3
-  strong_min_1m_pct: 6
+  weak_min_1m_pct: 5
+  strong_min_1m_pct: 8
   strong_min_1m_to_h1: 0.15
   strong_min_1m_to_m5: 0.3
   strong_max_dist_pct: 5
@@ -91,6 +97,8 @@ grade:
   trade_lookback_sec: 60
   min_trade_usd: 10
   require_net_buy: true
+  min_window_makers: 8
+  max_window_trades_per_maker: 12
 
 legs:
   end_drawdown_pct: 25

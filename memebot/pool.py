@@ -49,6 +49,7 @@ class PoolSnapshot:
     tx: dict[str, dict[str, float]]
     price_change_usd: dict[str, float | None]
     price_change_native: dict[str, float | None] = field(default_factory=dict)
+    dex: str = ""
 
 
 def _included_map(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -160,6 +161,7 @@ def parse_pools(payload: dict[str, Any], source: str) -> list[PoolSnapshot]:
                 tx=tx,
                 price_change_usd=changes,
                 price_change_native=native_changes,
+                dex=_rel_id(item, "dex") or "",
             )
         )
     return out
