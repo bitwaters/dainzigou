@@ -32,7 +32,7 @@ def _window_volume(pool: PoolSnapshot) -> float | None:
     vol = pool.volume or {}
     for key in ("m15", "m5"):
         value = vol.get(key)
-        if value is not None:
+        if value is not None and float(value) > 0:
             return float(value)
     return None
 

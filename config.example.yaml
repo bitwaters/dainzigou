@@ -59,7 +59,7 @@ radar:
     bsc: 0.4
 
 gates:
-  min_pool_age_min: 5
+  min_pool_age_min: 15
   min_reserve_usd: 15000
   min_fdv_usd: 25000
   max_m15_vol_to_reserve: 4
@@ -95,6 +95,7 @@ grade:
 legs:
   end_drawdown_pct: 25
   max_inactive_h: 24
+  reopen_cooldown_min: 360
 
 tracker:
   after_h: 1

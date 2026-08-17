@@ -38,6 +38,7 @@ STEP_NAMES = frozenset(
         "gate_turnover",
         "gate_m5",
         "detect_quota",
+        "leg_cooldown",
         "security_reject",
         "security_transient",
         "grade_input",
@@ -470,6 +471,18 @@ class Store:
             self.read(
                 lambda c: c.execute(
                     "SELECT * FROM legs WHERE network = ? AND token_address = ? AND ended = 0",
+                    (network, token_address),
+                ).fetchone()
+            ),
+        )
+
+    def get_last_ended_leg(self, network: str, token_address: str) -> sqlite3.Row | None:
+        return cast(
+            sqlite3.Row | None,
+            self.read(
+                lambda c: c.execute(
+                    "SELECT * FROM legs WHERE network = ? AND token_address = ? AND ended = 1 "
+                    "ORDER BY id DESC LIMIT 1",
                     (network, token_address),
                 ).fetchone()
             ),

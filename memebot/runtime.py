@@ -276,6 +276,9 @@ class Runtime:
             if gate.step:
                 self.store.incr_step(self._day(now), gate.step)
             return
+        if self._reopen_cooling(pool, now):
+            self.store.incr_step(self._day(now), "leg_cooldown")
+            return
         hit = self.goplus.cached(pool.network, pool.token_address)
         if hit is None:
             need_security.append(pool)
@@ -286,6 +289,23 @@ class Runtime:
             self.store.incr_step(self._day(now), "security_reject")
         else:
             self.store.incr_step(self._day(now), "security_transient")
+
+    def _reopen_cooling(self, pool: PoolSnapshot, now: datetime) -> bool:
+        if self.store.get_open_leg(pool.network, pool.token_address) is not None:
+            return False
+        cooldown = float(self.cfg.get("legs.reopen_cooldown_min") or 0)
+        if cooldown <= 0:
+            return False
+        row = self.store.get_last_ended_leg(pool.network, pool.token_address)
+        if row is None:
+            return False
+        try:
+            seen = datetime.fromisoformat(str(row["last_seen_at"]))
+        except ValueError:
+            return False
+        if seen.tzinfo is None:
+            seen = seen.replace(tzinfo=UTC)
+        return (now - seen).total_seconds() < cooldown * 60.0
 
     def _admit(
         self, pool: PoolSnapshot, verdict: SecurityVerdict, now: datetime

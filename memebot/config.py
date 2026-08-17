@@ -78,6 +78,7 @@ _REQUIRED_PATHS = (
     "grade.require_net_buy",
     "legs.end_drawdown_pct",
     "legs.max_inactive_h",
+    "legs.reopen_cooldown_min",
     "tracker.after_h",
     "tracker.scan_interval_h",
     "tracker.drawdown_pct",
@@ -362,6 +363,11 @@ def validate(raw: dict[str, Any], *, stop_grace_period: float = DEPLOY_STOP_GRAC
     inactive = _as_number("legs.max_inactive_h", _need(raw, "legs.max_inactive_h"))
     if inactive <= 0:
         raise ConfigError("legs.max_inactive_h", "must be > 0")
+    cooldown = _as_number(
+        "legs.reopen_cooldown_min", _need(raw, "legs.reopen_cooldown_min")
+    )
+    if cooldown < 0:
+        raise ConfigError("legs.reopen_cooldown_min", "must be >= 0")
 
     strong_ch = _validate_channel_id(
         "telegram.strong_channel_id", _need(raw, "telegram.strong_channel_id")
