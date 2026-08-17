@@ -20,6 +20,7 @@ from memebot.goplus_client import (
     GoPlusClient,
     GoPlusSettings,
     SecurityVerdict,
+    goplus_ready,
     solana_authority_open,
 )
 from memebot.grade import compute_metrics, decide, maker_stats, net_buy, parse_ohlcv, parse_trades
@@ -283,8 +284,11 @@ class Runtime:
         if hit is None:
             need_security.append(pool)
             return
-        if hit.status == "pass":
+        ready_ok = goplus_ready(pool.network, hit)
+        if ready_ok:
             ready.append((pool, hit))
+        elif hit.status == "pass":
+            need_security.append(pool)
         elif hit.status == "reject":
             self.store.incr_step(self._day(now), "security_reject")
         else:
@@ -310,6 +314,8 @@ class Runtime:
     def _admit(
         self, pool: PoolSnapshot, verdict: SecurityVerdict, now: datetime
     ) -> GradeJob | None:
+        if not goplus_ready(pool.network, verdict):
+            return None
         open_leg = self.store.get_open_leg(pool.network, pool.token_address)
         if open_leg is not None:
             live = self.store.pending_or_sent_grades(
@@ -422,11 +428,11 @@ class Runtime:
         if need_security:
             fetched = await self._fetch_security(need_security)
             for pool, verdict in fetched:
-                if verdict.status == "reject":
-                    self.store.incr_step(self._day(now), "security_reject")
-                    continue
                 if verdict.status == "transient":
                     self.store.incr_step(self._day(now), "security_transient")
+                    continue
+                if not goplus_ready(pool.network, verdict):
+                    self.store.incr_step(self._day(now), "security_reject")
                     continue
                 job = self._admit(pool, verdict, now)
                 if job is not None:
@@ -491,6 +497,10 @@ class Runtime:
             await self._grade_and_push(job, now)
 
     async def _grade_and_push(self, job: GradeJob, now: datetime) -> None:
+        pool = job.pool
+        if not goplus_ready(pool.network, job.verdict):
+            self.store.incr_step(self._day(now), "security_reject")
+            return
         metrics = compute_metrics(
             job.bars or [],
             int(now.timestamp()),
@@ -499,7 +509,6 @@ class Runtime:
         if metrics is None:
             self.store.incr_step(self._day(now), "ohlcv_fail")
             return
-        pool = job.pool
         h1 = (pool.price_change_usd or {}).get("h1")
         m5 = (pool.price_change_usd or {}).get("m5")
         weak_live = "weak" in self.store.pending_or_sent_grades(

@@ -136,6 +136,15 @@ def solana_authority_open(
     return mintable is not False or freezable is not False
 
 
+def goplus_ready(network: str, verdict: SecurityVerdict) -> bool:
+    """True only for a complete GoPlus pass. Reject, transient, and unknown fields cannot push."""
+    if verdict.status != "pass":
+        return False
+    if network == "solana":
+        return verdict.mintable is not None and verdict.freezable is not None
+    return True
+
+
 def _pick_item(result: dict[str, Any], network: str, address: str) -> dict[str, Any] | None:
     item = result.get(address)
     if isinstance(item, dict):
@@ -174,11 +183,11 @@ def map_solana(item: dict[str, Any], max_tax_pct: float) -> SecurityVerdict:
         return SecurityVerdict("reject", reason="transfer_hook")
     if fee_pct is not None and fee_pct >= max_tax_pct:
         return SecurityVerdict("reject", reason="transfer_fee")
-    return SecurityVerdict(
-        "pass",
-        mintable=_authority_on(item.get("mintable")),
-        freezable=_authority_on(item.get("freezable")),
-    )
+    mintable = _authority_on(item.get("mintable"))
+    freezable = _authority_on(item.get("freezable"))
+    if mintable is None or freezable is None:
+        return SecurityVerdict("reject", reason="missing_field")
+    return SecurityVerdict("pass", mintable=mintable, freezable=freezable)
 
 
 def map_bsc(item: dict[str, Any], max_tax_pct: float) -> SecurityVerdict:
@@ -414,7 +423,7 @@ class GoPlusClient:
         need: list[str] = []
         for addr in addresses:
             hit = self.cached(network, addr)
-            if hit is not None:
+            if hit is not None and (hit.status != "pass" or goplus_ready(network, hit)):
                 out[addr] = hit
             else:
                 need.append(addr)
