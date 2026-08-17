@@ -85,10 +85,10 @@ security:
   transient_ttl_sec: 120
   max_tax_pct: 10
   min_lp_locked_pct: 80
-  # 单人/创建者 5%、top10 40%：15 分钟仍集中的盘会被拒，这是有意的。
-  max_top_holder_pct: 5
+  # 单地址不设上限（null）；只卡 top10。Solana 缺烧池/持仓数据跳过，有数据仍按阈值拒。
+  max_top_holder_pct: null
   max_top10_holder_pct: 40
-  max_creator_pct: 5
+  max_creator_pct: 10
   timeout_sec: 8
   batch_size: 30
 

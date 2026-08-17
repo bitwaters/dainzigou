@@ -507,7 +507,7 @@ def map_solana(
         return SecurityVerdict("reject", reason="freezable")
     dist = _distribution_verdict(
         item,
-        required=True,
+        required=False,
         min_lp_locked_pct=min_lp_locked_pct,
         max_top_holder_pct=max_top_holder_pct,
         max_top10_holder_pct=max_top10_holder_pct,
