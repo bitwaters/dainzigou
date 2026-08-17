@@ -71,6 +71,7 @@ _REQUIRED_PATHS = (
     "security.min_lp_locked_pct",
     "security.max_top_holder_pct",
     "security.max_top10_holder_pct",
+    "security.max_creator_pct",
     "security.timeout_sec",
     "security.batch_size",
     "grade.ohlcv_limit",
@@ -81,6 +82,7 @@ _REQUIRED_PATHS = (
     "grade.strong_min_1m_to_m5",
     "grade.strong_max_dist_pct",
     "grade.weak_max_dist_pct",
+    "grade.max_h1_pct",
     "grade.trade_lookback_sec",
     "grade.min_trade_usd",
     "grade.require_net_buy",
@@ -308,6 +310,19 @@ def validate(raw: dict[str, Any], *, stop_grace_period: float = DEPLOY_STOP_GRAC
     if m5_ratio <= 0:
         raise ConfigError("grade.strong_min_1m_to_m5", "must be > 0")
 
+    h1_caps = _need(raw, "grade.max_h1_pct")
+    if h1_caps is not None:
+        if not isinstance(h1_caps, dict):
+            raise ConfigError("grade.max_h1_pct", "must be a mapping by network or null")
+        nets = {str(n) for n in (_need(raw, "networks") or [])}
+        for key, value in h1_caps.items():
+            path = f"grade.max_h1_pct.{key}"
+            if str(key) not in nets:
+                raise ConfigError(path, "keys must be in networks")
+            cap = _as_number(path, value)
+            if cap <= 0:
+                raise ConfigError(path, "must be > 0")
+
     lookback = _as_number("grade.trade_lookback_sec", _need(raw, "grade.trade_lookback_sec"))
     if lookback <= 0:
         raise ConfigError("grade.trade_lookback_sec", "must be > 0")
@@ -404,6 +419,9 @@ def validate(raw: dict[str, Any], *, stop_grace_period: float = DEPLOY_STOP_GRAC
             "security.max_top10_holder_pct",
             "must be >= security.max_top_holder_pct",
         )
+    max_creator = _optional_number(raw, "security.max_creator_pct")
+    if max_creator is not None and (max_creator <= 0 or max_creator > 100):
+        raise ConfigError("security.max_creator_pct", "must be > 0 and <= 100")
 
     grace = _as_number("runtime.shutdown.grace_sec", _need(raw, "runtime.shutdown.grace_sec"))
     if grace >= stop_grace_period:

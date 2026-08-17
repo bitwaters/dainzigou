@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import logging
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
@@ -47,12 +47,14 @@ class GoPlusSettings:
     min_lp_locked_pct: float | None = None
     max_top_holder_pct: float | None = None
     max_top10_holder_pct: float | None = None
+    max_creator_pct: float | None = None
 
     @classmethod
     def from_app(cls, cfg: AppConfig) -> GoPlusSettings:
         min_lp = cfg.get("security.min_lp_locked_pct")
         max_top = cfg.get("security.max_top_holder_pct")
         max_top10 = cfg.get("security.max_top10_holder_pct")
+        max_creator = cfg.get("security.max_creator_pct")
         return cls(
             timeout_sec=float(cfg.get("security.timeout_sec")),
             batch_size=int(cfg.get("security.batch_size")),
@@ -62,6 +64,7 @@ class GoPlusSettings:
             min_lp_locked_pct=None if min_lp is None else float(min_lp),
             max_top_holder_pct=None if max_top is None else float(max_top),
             max_top10_holder_pct=None if max_top10 is None else float(max_top10),
+            max_creator_pct=None if max_creator is None else float(max_creator),
         )
 
 
@@ -124,6 +127,11 @@ _BURN_EVM = frozenset(
         "0x0000000000000000000000000000000000000001",
     }
 )
+_BURN_SOL = frozenset(
+    {
+        "1nc1nerator11111111111111111111111111111111",
+    }
+)
 _SKIP_TAGS = (
     "pancake",
     "uniswap",
@@ -144,11 +152,53 @@ def _holder_addr(node: dict[str, Any]) -> str:
     return ""
 
 
+def _addr_key(addr: str) -> str:
+    if addr.startswith(("0x", "0X")):
+        return addr.lower()
+    return addr
+
+
+def _creator_held_pct(item: dict[str, Any]) -> float | None:
+    """BSC `creator_percent`; Solana matches `creators[].address` against `holders`."""
+    direct = _frac_pct(item.get("creator_percent"))
+    if direct is not None:
+        return direct
+    creators = _dict_nodes(item.get("creators"))
+    if not creators:
+        return None
+    addrs = {_addr_key(addr) for node in creators if (addr := _holder_addr(node))}
+    if not addrs:
+        return None
+    holders = _dict_nodes(item.get("holders"))
+    if not holders:
+        return None
+    total = 0.0
+    matched = False
+    for node in holders:
+        addr = _holder_addr(node)
+        if not addr or _addr_key(addr) not in addrs:
+            continue
+        pct = _frac_pct(node.get("percent"))
+        if pct is None:
+            continue
+        matched = True
+        total += pct
+    if not matched:
+        return None
+    return min(100.0, total)
+
+
 def _is_burn_addr(addr: str) -> bool:
+    if addr in _BURN_SOL:
+        return True
     lowered = addr.lower()
     if lowered in _BURN_EVM:
         return True
     return lowered.startswith("0x") and len(lowered) == 42 and set(lowered[2:]) <= {"0"}
+
+
+def _is_burn_tag(tag: Any) -> bool:
+    return "burn" in str(tag or "").lower()
 
 
 def _is_skip_tag(tag: Any) -> bool:
@@ -177,31 +227,85 @@ def _dict_nodes(value: Any) -> list[dict[str, Any]]:
     return [node for node in value if isinstance(node, dict)]
 
 
-def lp_locked_pct(item: dict[str, Any]) -> float | None:
-    nodes = _dict_nodes(item.get("lp_holders"))
-    if nodes:
-        locked = 0.0
-        for node in nodes:
-            pct = _frac_pct(node.get("percent"))
-            if pct is None:
-                continue
-            addr = _holder_addr(node)
-            if _is_locked_flag(node.get("is_locked")) or _is_burn_addr(addr):
-                locked += pct
-        return min(100.0, locked)
+def _dex_burn_pct(item: dict[str, Any]) -> float | None:
     dex = item.get("dex")
-    if isinstance(dex, list):
-        burns: list[float] = []
-        for node in dex:
-            if not isinstance(node, dict):
-                continue
-            burn = _tax(node.get("burn_percent"))
-            if burn is None or burn < 0:
-                continue
-            burns.append(burn)
-        if burns:
-            return max(burns)
+    if not isinstance(dex, list):
+        return None
+    burns: list[float] = []
+    for node in dex:
+        if not isinstance(node, dict):
+            continue
+        burn = _tax(node.get("burn_percent"))
+        if burn is None or burn < 0:
+            continue
+        burns.append(burn)
+    if not burns:
+        return None
+    return max(burns)
+
+
+def _dex_burn_for_pool(item: dict[str, Any], pool_address: str | None) -> float | None:
+    """Burn % for the radar pool only. Never use a different pool's burn to pass."""
+    dex = item.get("dex")
+    if not isinstance(dex, list):
+        return None
+    nodes = [node for node in dex if isinstance(node, dict)]
+    needle = (pool_address or "").strip()
+    if needle:
+        nodes = [node for node in nodes if str(node.get("id") or "").strip() == needle]
+        if not nodes:
+            return None
+    burns: list[float] = []
+    for node in nodes:
+        burn = _tax(node.get("burn_percent"))
+        if burn is None or burn < 0:
+            continue
+        burns.append(burn)
+    if not burns:
+        return None
+    if needle:
+        return burns[0]
+    if len(burns) == 1:
+        return burns[0]
     return None
+
+
+def _lp_holders_locked_pct(item: dict[str, Any]) -> float | None:
+    nodes = _dict_nodes(item.get("lp_holders"))
+    if not nodes:
+        return None
+    locked = 0.0
+    for node in nodes:
+        pct = _frac_pct(node.get("percent"))
+        if pct is None:
+            continue
+        addr = _holder_addr(node)
+        if (
+            _is_locked_flag(node.get("is_locked"))
+            or _is_burn_addr(addr)
+            or _is_burn_tag(node.get("tag"))
+        ):
+            locked += pct
+    return min(100.0, locked)
+
+
+def lp_locked_pct(
+    item: dict[str, Any],
+    *,
+    prefer_dex_burn: bool = False,
+    pool_address: str | None = None,
+) -> float | None:
+    if prefer_dex_burn:
+        dex = _dex_burn_for_pool(item, pool_address)
+        holders = _lp_holders_locked_pct(item)
+        vals = [v for v in (dex, holders) if v is not None]
+        if not vals:
+            return None
+        return max(vals)
+    holders = _lp_holders_locked_pct(item)
+    if holders is not None:
+        return holders
+    return _dex_burn_pct(item)
 
 
 def _free_holder_pcts(item: dict[str, Any]) -> list[float] | None:
@@ -209,7 +313,7 @@ def _free_holder_pcts(item: dict[str, Any]) -> list[float] | None:
     if not holders:
         return None
     lp_addrs = {
-        _holder_addr(node).lower()
+        _addr_key(_holder_addr(node))
         for node in _dict_nodes(item.get("lp_holders"))
         if _holder_addr(node)
     }
@@ -218,12 +322,13 @@ def _free_holder_pcts(item: dict[str, Any]) -> list[float] | None:
         addr = _holder_addr(node)
         if not addr:
             continue
-        lowered = addr.lower()
+        key = _addr_key(addr)
         if (
-            _is_burn_addr(lowered)
+            _is_burn_addr(addr)
             or _is_locked_flag(node.get("is_locked"))
             or _is_skip_tag(node.get("tag"))
-            or lowered in lp_addrs
+            or _is_burn_tag(node.get("tag"))
+            or key in lp_addrs
         ):
             continue
         pct = _frac_pct(node.get("percent"))
@@ -247,6 +352,15 @@ def top10_free_holder_pct(item: dict[str, Any]) -> float | None:
     return min(100.0, sum(sorted(pcts, reverse=True)[:10]))
 
 
+def _owner_still_active(item: dict[str, Any]) -> bool:
+    if "owner_address" not in item:
+        return True
+    addr = item.get("owner_address")
+    if not isinstance(addr, str) or not addr.strip():
+        return False
+    return not _is_burn_addr(addr.strip())
+
+
 def _distribution_verdict(
     item: dict[str, Any],
     *,
@@ -254,10 +368,18 @@ def _distribution_verdict(
     min_lp_locked_pct: float | None,
     max_top_holder_pct: float | None,
     max_top10_holder_pct: float | None,
+    max_creator_pct: float | None,
+    prefer_dex_burn: bool = False,
+    pool_address: str | None = None,
 ) -> SecurityVerdict | None:
-    if min_lp_locked_pct is None and max_top_holder_pct is None and max_top10_holder_pct is None:
+    if (
+        min_lp_locked_pct is None
+        and max_top_holder_pct is None
+        and max_top10_holder_pct is None
+        and max_creator_pct is None
+    ):
         return None
-    locked = lp_locked_pct(item)
+    locked = lp_locked_pct(item, prefer_dex_burn=prefer_dex_burn, pool_address=pool_address)
     top = top_free_holder_pct(item)
     top10 = top10_free_holder_pct(item)
     reason: str | None = None
@@ -279,6 +401,10 @@ def _distribution_verdict(
                 reason = "missing_field"
         elif top10 > max_top10_holder_pct:
             reason = "top10_concentration"
+    if reason is None and max_creator_pct is not None:
+        creator = _creator_held_pct(item)
+        if creator is not None and creator > max_creator_pct:
+            reason = "creator_concentration"
     if reason is None:
         return None
     return SecurityVerdict("reject", reason=reason)
@@ -317,7 +443,7 @@ def goplus_ready(network: str, verdict: SecurityVerdict) -> bool:
     if verdict.status != "pass":
         return False
     if network == "solana":
-        return verdict.mintable is not None and verdict.freezable is not None
+        return verdict.mintable is False and verdict.freezable is False
     return True
 
 
@@ -343,6 +469,8 @@ def map_solana(
     min_lp_locked_pct: float | None = None,
     max_top_holder_pct: float | None = None,
     max_top10_holder_pct: float | None = None,
+    max_creator_pct: float | None = None,
+    pool_address: str | None = None,
 ) -> SecurityVerdict:
     closable = _authority_on(item.get("closable"))
     mutable = _authority_on(item.get("balance_mutable_authority"))
@@ -368,14 +496,24 @@ def map_solana(
         return SecurityVerdict("reject", reason="transfer_fee")
     mintable = _authority_on(item.get("mintable"))
     freezable = _authority_on(item.get("freezable"))
-    if mintable is None or freezable is None:
+    metadata = _authority_on(item.get("metadata_mutable"))
+    if mintable is None or freezable is None or metadata is None:
         return SecurityVerdict("reject", reason="missing_field")
+    if metadata:
+        return SecurityVerdict("reject", reason="metadata_mutable")
+    if mintable:
+        return SecurityVerdict("reject", reason="mintable")
+    if freezable:
+        return SecurityVerdict("reject", reason="freezable")
     dist = _distribution_verdict(
         item,
-        required=False,
+        required=True,
         min_lp_locked_pct=min_lp_locked_pct,
         max_top_holder_pct=max_top_holder_pct,
         max_top10_holder_pct=max_top10_holder_pct,
+        max_creator_pct=max_creator_pct,
+        prefer_dex_burn=True,
+        pool_address=pool_address,
     )
     if dist is not None:
         return dist
@@ -389,7 +527,13 @@ def map_bsc(
     min_lp_locked_pct: float | None = None,
     max_top_holder_pct: float | None = None,
     max_top10_holder_pct: float | None = None,
+    max_creator_pct: float | None = None,
 ) -> SecurityVerdict:
+    open_src = _flag(item.get("is_open_source"))
+    if open_src is None:
+        return SecurityVerdict("reject", reason="missing_field")
+    if not open_src:
+        return SecurityVerdict("reject", reason="not_open_source")
     honeypot = _flag(item.get("is_honeypot"))
     pausable = _flag(item.get("transfer_pausable"))
     mintable = _flag(item.get("is_mintable"))
@@ -429,6 +573,21 @@ def map_bsc(
         return SecurityVerdict("reject", reason="selfdestruct")
     if _optional_flag(item.get("personal_slippage_modifiable")):
         return SecurityVerdict("reject", reason="personal_slippage")
+    hidden = _flag(item.get("hidden_owner"))
+    if hidden is None:
+        return SecurityVerdict("reject", reason="missing_field")
+    if hidden:
+        return SecurityVerdict("reject", reason="hidden_owner")
+    take_back = _flag(item.get("can_take_back_ownership"))
+    if take_back is None:
+        return SecurityVerdict("reject", reason="missing_field")
+    if take_back:
+        return SecurityVerdict("reject", reason="take_back_ownership")
+    blacklisted = _flag(item.get("is_blacklisted"))
+    if blacklisted is None:
+        return SecurityVerdict("reject", reason="missing_field")
+    if blacklisted and _owner_still_active(item):
+        return SecurityVerdict("reject", reason="blacklist")
     launch = item.get("launchpad_token")
     if isinstance(launch, dict) and str(launch.get("is_launchpad_token")).strip() == "1":
         name = str(launch.get("launchpad_name") or "").lower().replace("_", "-")
@@ -440,6 +599,7 @@ def map_bsc(
         min_lp_locked_pct=min_lp_locked_pct,
         max_top_holder_pct=max_top_holder_pct,
         max_top10_holder_pct=max_top10_holder_pct,
+        max_creator_pct=max_creator_pct,
     )
     if dist is not None:
         return dist
@@ -455,6 +615,8 @@ def map_address(
     min_lp_locked_pct: float | None = None,
     max_top_holder_pct: float | None = None,
     max_top10_holder_pct: float | None = None,
+    max_creator_pct: float | None = None,
+    pool_address: str | None = None,
 ) -> SecurityVerdict:
     if network not in ENDPOINTS:
         return SecurityVerdict("reject", reason="unknown_network")
@@ -471,6 +633,8 @@ def map_address(
             min_lp_locked_pct=min_lp_locked_pct,
             max_top_holder_pct=max_top_holder_pct,
             max_top10_holder_pct=max_top10_holder_pct,
+            max_creator_pct=max_creator_pct,
+            pool_address=pool_address,
         )
     return map_bsc(
         item,
@@ -478,6 +642,7 @@ def map_address(
         min_lp_locked_pct=min_lp_locked_pct,
         max_top_holder_pct=max_top_holder_pct,
         max_top10_holder_pct=max_top10_holder_pct,
+        max_creator_pct=max_creator_pct,
     )
 
 
@@ -646,10 +811,15 @@ class GoPlusClient:
         return payload
 
     async def check_many(
-        self, network: str, addresses: Sequence[str]
+        self,
+        network: str,
+        addresses: Sequence[str],
+        *,
+        pool_by_token: Mapping[str, str] | None = None,
     ) -> dict[str, SecurityVerdict]:
         out: dict[str, SecurityVerdict] = {}
         need: list[str] = []
+        pools = pool_by_token or {}
         for addr in addresses:
             hit = self.cached(network, addr)
             if hit is not None and (hit.status != "pass" or goplus_ready(network, hit)):
@@ -683,6 +853,8 @@ class GoPlusClient:
                     min_lp_locked_pct=self.settings.min_lp_locked_pct,
                     max_top_holder_pct=self.settings.max_top_holder_pct,
                     max_top10_holder_pct=self.settings.max_top10_holder_pct,
+                    max_creator_pct=self.settings.max_creator_pct,
+                    pool_address=pools.get(addr),
                 )
                 self._remember(network, addr, verdict)
                 out[addr] = verdict

@@ -70,7 +70,7 @@ def evaluate(
     if denied:
         names = {str(x).strip().lower() for x in denied if x}
         dex = (pool.dex or "").strip().lower()
-        if dex and dex in names:
+        if not dex or dex in names:
             return GateDecision(False, "gate_dex")
 
     gates = raw.get("gates") or {}

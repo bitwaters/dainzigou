@@ -169,7 +169,9 @@ class Runtime:
     async def start(self) -> None:
         now = datetime.now(UTC)
         sink = self._sink()
-        abandoned, hash_changed = sink.reconcile_startup(now, self.cfg.config_hash)
+        prev_hash = self.store.kv_get("config_hash")
+        hash_changed = prev_hash is not None and prev_hash != self.cfg.config_hash
+        abandoned, _ = sink.reconcile_startup(now, self.cfg.config_hash)
         if abandoned:
             await sink.alert(
                 f"启动对账：{len(abandoned)} 条过期 pending 已标 abandoned，不自动补发",
@@ -177,8 +179,9 @@ class Runtime:
                 now,
             )
         if hash_changed:
+            self.store.clear_security_cache()
             await sink.alert(
-                f"参数变更：配置指纹已更新为 {self.cfg.config_hash}",
+                f"参数变更：配置指纹已更新为 {self.cfg.config_hash}，已清空安全缓存",
                 "startup.config_hash",
                 now,
             )
@@ -358,7 +361,11 @@ class Runtime:
         async def _one(network: str, group: list[PoolSnapshot]) -> None:
             addrs = [p.token_address for p in group]
             self.network_calls.append(f"goplus:{network}:{len(addrs)}")
-            results = await gp.check_many(network, addrs)
+            results = await gp.check_many(
+                network,
+                addrs,
+                pool_by_token={p.token_address: p.address for p in group},
+            )
             for pool in group:
                 out.append((pool, results[pool.token_address]))
 
@@ -489,13 +496,12 @@ class Runtime:
                 )
                 min_makers = float(self.cfg.get("grade.min_window_makers") or 0)
                 max_per = float(self.cfg.get("grade.max_window_trades_per_maker") or 0)
-                if unique > 0:
-                    if min_makers > 0 and unique < min_makers:
-                        self.store.incr_step(self._day(now), "trade_wash")
-                        continue
-                    if max_per > 0 and per > max_per:
-                        self.store.incr_step(self._day(now), "trade_wash")
-                        continue
+                if min_makers > 0 and unique < min_makers:
+                    self.store.incr_step(self._day(now), "trade_wash")
+                    continue
+                if max_per > 0 and unique > 0 and per > max_per:
+                    self.store.incr_step(self._day(now), "trade_wash")
+                    continue
                 max_bs = float(self.cfg.get("grade.max_window_buy_sell_ratio") or 0)
                 if max_bs > 1:
                     if sell <= 0:
@@ -528,6 +534,10 @@ class Runtime:
             return
         h1 = (pool.price_change_usd or {}).get("h1")
         m5 = (pool.price_change_usd or {}).get("m5")
+        caps = self.cfg.get("grade.max_h1_pct")
+        max_h1 = None
+        if isinstance(caps, dict) and pool.network in caps:
+            max_h1 = float(caps[pool.network])
         weak_live = "weak" in self.store.pending_or_sent_grades(
             pool.network, pool.token_address, job.leg_id
         )
@@ -548,6 +558,7 @@ class Runtime:
             weak_max_dist_pct=float(self.cfg.get("grade.weak_max_dist_pct")),
             min_to_h1=float(self.cfg.get("grade.strong_min_1m_to_h1")),
             min_to_m5=float(self.cfg.get("grade.strong_min_1m_to_m5")),
+            max_h1_pct=max_h1,
         )
         if decision.grade is None:
             self.store.incr_step(self._day(now), decision.reason)

@@ -203,9 +203,12 @@ def decide(
     weak_max_dist_pct: float,
     min_to_h1: float,
     min_to_m5: float,
+    max_h1_pct: float | None = None,
 ) -> GradeDecision:
     if require_net_buy and (net is None or net <= 0):
         return GradeDecision(None, "net_buy_nonpositive")
+    if max_h1_pct is not None and h1 is not None and h1 > max_h1_pct:
+        return GradeDecision(None, "h1_excess")
     if dist > weak_max_dist_pct:
         return GradeDecision(None, "pullback")
     if not authority_open:

@@ -52,6 +52,7 @@ STEP_NAMES = frozenset(
         "trade_imbalance",
         "net_buy_nonpositive",
         "pullback",
+        "h1_excess",
         "grade_none",
         "pushed_strong",
         "pushed_weak",
@@ -425,6 +426,12 @@ class Store:
                     datetime.now(UTC).isoformat(),
                 ),
             )
+
+        self.submit(_fn)
+
+    def clear_security_cache(self) -> None:
+        def _fn(conn: sqlite3.Connection) -> None:
+            conn.execute("DELETE FROM security_cache")
 
         self.submit(_fn)
 

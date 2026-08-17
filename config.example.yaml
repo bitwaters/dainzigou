@@ -1,4 +1,5 @@
 # 动量信号机配置模板。复制为 config.yaml 后填入真实频道 ID。
+# 上线必须把本文件全部键同步到现网 config.yaml 后 rebuild；缺键会启动失败，配置指纹变化会清空安全缓存。
 # 密钥只走 .env：COINGECKO_API_KEY、GOPLUS_APP_KEY、GOPLUS_APP_SECRET、TELEGRAM_BOT_TOKEN、TELEGRAM_ADMIN_ID
 
 networks: [solana, bsc]
@@ -61,7 +62,7 @@ radar:
 gates:
   min_pool_age_min: 15
   min_reserve_usd: 15000
-  min_fdv_usd: 25000
+  min_fdv_usd: null
   max_m15_vol_to_reserve: 4
   deny_dexes:
     - pump-fun
@@ -84,8 +85,10 @@ security:
   transient_ttl_sec: 120
   max_tax_pct: 10
   min_lp_locked_pct: 80
-  max_top_holder_pct: 20
+  # 单人/创建者 5%、top10 40%：15 分钟仍集中的盘会被拒，这是有意的。
+  max_top_holder_pct: 5
   max_top10_holder_pct: 40
+  max_creator_pct: 5
   timeout_sec: 8
   batch_size: 30
 
@@ -98,6 +101,8 @@ grade:
   strong_min_1m_to_m5: 0.3
   strong_max_dist_pct: 5
   weak_max_dist_pct: 10
+  max_h1_pct:
+    bsc: 80
   trade_lookback_sec: 60
   min_trade_usd: 10
   require_net_buy: true
